@@ -75,8 +75,18 @@ export default function ManualScreen() {
           lockToLandscape();
 
           return () => {
-               // Unlock when leaving this screen
-               ScreenOrientation.unlockAsync().catch(() => {});
+               // Force back to portrait when leaving this screen
+               const resetToPortrait = async () => {
+                    try {
+                         await ScreenOrientation.lockAsync(
+                              ScreenOrientation.OrientationLock.PORTRAIT_UP
+                         );
+                         console.log('Orientation reset to portrait');
+                    } catch (err) {
+                         console.warn('Failed to reset orientation:', err);
+                    }
+               };
+               resetToPortrait();
           };
      }, []);
 
