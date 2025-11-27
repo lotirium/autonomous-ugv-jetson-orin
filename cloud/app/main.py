@@ -418,43 +418,43 @@ def _iter_webcam_candidates() -> list[int | str]:
 
 
 def _create_camera_service() -> CameraService:
-    """Create camera service for mobile app streaming."""
+    """Create camera service for mobile app streaming using USB camera."""
     primary_source = None
 
-    # Initialize OAK-D camera as primary source (shared for both streaming and vision)
-    if DepthAICameraSource.is_available():
+    # Use USB camera for streaming (OAK-D is reserved for AI vision via /shot endpoint)
+    if OpenCVCameraSource.is_available():
+        for candidate in _iter_webcam_candidates():
+            try:
+                LOGGER.info(
+                    "Attempting webcam device %s for primary stream source",
+                    candidate,
+                )
+                primary_source = OpenCVCameraSource(device=candidate)
+            except CameraError as exc:
+                LOGGER.warning(
+                    "OpenCV camera source unavailable on %s: %s",
+                    candidate,
+                    exc,
+                )
+                primary_source = None
+                continue
+            else:
+                LOGGER.info("Using OpenCV camera source for streaming")
+                break
+        else:
+            LOGGER.warning("Unable to open any webcam device for streaming")
+    else:
+        LOGGER.warning(
+            "OpenCV package not installed; skipping USB camera stream. Install the 'opencv-python' package to enable it."
+        )
+
+    # Fallback to OAK-D only if USB camera is not available
+    if primary_source is None and DepthAICameraSource.is_available():
         try:
             primary_source = DepthAICameraSource()
-            LOGGER.info("Using DepthAI camera source for streaming and vision")
+            LOGGER.info("Using DepthAI camera source for streaming (USB camera unavailable)")
         except CameraError as exc:
             LOGGER.warning("DepthAI camera source unavailable: %s", exc)
-
-    if primary_source is None:
-        if OpenCVCameraSource.is_available():
-            for candidate in _iter_webcam_candidates():
-                try:
-                    LOGGER.info(
-                        "Attempting webcam device %s for primary stream source",
-                        candidate,
-                    )
-                    primary_source = OpenCVCameraSource(device=candidate)
-                except CameraError as exc:
-                    LOGGER.warning(
-                        "OpenCV camera source unavailable on %s: %s",
-                        candidate,
-                        exc,
-                    )
-                    primary_source = None
-                    continue
-                else:
-                    LOGGER.info("Using OpenCV camera source for streaming")
-                    break
-            else:
-                LOGGER.warning("Unable to open any webcam device for streaming")
-        else:
-            LOGGER.warning(
-                "OpenCV package not installed; skipping USB camera stream. Install the 'opencv-python' package to enable it."
-            )
 
     fallback_source = None
     if _PLACEHOLDER_JPEG:
@@ -1113,15 +1113,22 @@ async def speak_text(request: dict):
 async def single_frame() -> Response:
     """Serve a single JPEG frame from OAK-D camera for AI vision."""
     try:
-        # Use the same camera service (OAK-D shared for streaming and vision)
-        camera_service = app.state.camera_service
-        if camera_service:
-            frame = await camera_service.get_frame()
+        # Use OAK-D directly for AI vision (separate from streaming)
+        if not DepthAICameraSource.is_available():
+            raise HTTPException(status_code=503, detail="OAK-D camera not available")
+        
+        # Create a temporary OAK-D source for this single frame
+        oakd_source = DepthAICameraSource()
+        try:
+            frame = await oakd_source.get_jpeg_frame()
             return Response(content=frame, media_type="image/jpeg")
-        else:
-            raise HTTPException(status_code=503, detail="Camera service not available")
+        finally:
+            await oakd_source.close()
+    except CameraError as e:
+        LOGGER.error(f"Failed to get OAK-D frame: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
-        LOGGER.error(f"Failed to get camera frame: {e}")
+        LOGGER.error(f"Unexpected error getting frame: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
