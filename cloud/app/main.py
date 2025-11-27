@@ -806,7 +806,7 @@ async def voice_websocket(websocket: WebSocket):
                                             frame_url = f"http://{pi_ip}:8000/shot"
                                             LOGGER.info(f"📷 Fetching frame from Pi: {frame_url}")
                                             
-                                            async with httpx.AsyncClient(timeout=5.0) as client:
+                                            async with httpx.AsyncClient(timeout=15.0) as client:
                                                 frame_response = await client.get(frame_url)
                                                 if frame_response.status_code == 200:
                                                     image_bytes = frame_response.content
