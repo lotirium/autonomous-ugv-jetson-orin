@@ -252,7 +252,15 @@ export async function tryMdnsHostname(
  * Add your robot's Tailscale IP here for automatic discovery.
  */
 const KNOWN_TAILSCALE_IPS = [
-  "100.72.107.106",  // ROVY Pi
+  "100.72.107.106",  // ROVY Pi (rovy-2)
+];
+
+/**
+ * Known local network IPs for ROVY robots.
+ * These are tried in addition to subnet scanning.
+ */
+const KNOWN_LOCAL_IPS = [
+  "172.19.24.56",  // ROVY Pi on UTD network
 ];
 
 /**
@@ -262,6 +270,21 @@ export async function tryTailscaleIps(
   port: number = DEFAULT_PORT
 ): Promise<DiscoveredRobot | null> {
   for (const ip of KNOWN_TAILSCALE_IPS) {
+    const robot = await probeHost(ip, port);
+    if (robot) {
+      return robot;
+    }
+  }
+  return null;
+}
+
+/**
+ * Try to reach robot via known local IPs.
+ */
+export async function tryKnownLocalIps(
+  port: number = DEFAULT_PORT
+): Promise<DiscoveredRobot | null> {
+  for (const ip of KNOWN_LOCAL_IPS) {
     const robot = await probeHost(ip, port);
     if (robot) {
       return robot;
@@ -319,7 +342,23 @@ export async function discoverRobots(
     };
   }
 
-  // 3. Fall back to subnet scan
+  // 3. Try known local IPs (for larger subnets like /19)
+  console.log("Trying known local IPs...");
+  const knownLocalRobot = await tryKnownLocalIps(port);
+  if (knownLocalRobot) {
+    console.log("Found robot via known local IP:", knownLocalRobot.ip);
+    foundRobots.push(knownLocalRobot);
+    options.onProgress?.(1, 1, foundRobots);
+    return {
+      robots: foundRobots,
+      phoneIp,
+      subnet: phoneIp ? getSubnet(phoneIp) : null,
+      scannedCount: 1,
+      durationMs: Date.now() - startTime,
+    };
+  }
+
+  // 4. Fall back to subnet scan
   console.log("Falling back to subnet scan...");
   return discoverRobotsOnNetwork(options);
 }
