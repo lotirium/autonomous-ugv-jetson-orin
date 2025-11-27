@@ -628,6 +628,12 @@ async def camera_websocket(websocket: WebSocket):
                     await asyncio.sleep(0.1)
                     continue
                     
+            except RuntimeError as e:
+                # WebSocket closed by client
+                if "close message has been sent" in str(e).lower():
+                    LOGGER.info("WebSocket closed by client")
+                    break
+                raise
             except Exception as frame_error:
                 LOGGER.warning(f"Frame capture error: {frame_error}")
                 await asyncio.sleep(0.1)
@@ -638,16 +644,12 @@ async def camera_websocket(websocket: WebSocket):
             
     except Exception as exc:
         LOGGER.error("WebSocket error: %s", exc, exc_info=True)
-        try:
-            await websocket.send_text(json.dumps({"error": str(exc)}))
-            await websocket.close()
-        except Exception:
-            pass
     finally:
         try:
             await websocket.close()
         except Exception:
             pass
+        LOGGER.info("WebSocket disconnected")
 
 
 @app.websocket("/json")
@@ -834,7 +836,7 @@ async def voice_websocket(websocket: WebSocket):
                                                 if frame_response.status_code == 200:
                                                     image_bytes = frame_response.content
                                                     response = await anyio.to_thread.run_sync(
-                                                        assistant.ask, transcript, image_bytes
+                                                        assistant.ask_with_vision, transcript, image_bytes
                                                     )
                                                 else:
                                                     LOGGER.warning(f"Failed to get frame: {frame_response.status_code}")
