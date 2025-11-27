@@ -1,3 +1,6 @@
+# HTTP client for async API calls
+httpx==0.28.1
+
 # Serial communication with ESP32 rover controller
 pyserial==3.5
 
@@ -10,3 +13,26 @@ depthai==2.30.0.0
 depthai-nodes==0.3.4
 depthai-pipeline-graph==0.0.5
 depthai-sdk==1.15.1
+
+# ============================================================================
+# AI Model Support (Optimized for Speed)
+# ============================================================================
+
+# Core ML frameworks
+torch>=2.1.0
+transformers>=4.40.0
+accelerate>=0.27.0
+bitsandbytes>=0.43.0  # For 4-bit quantization
+
+# Vision model utilities
+qwen-vl-utils>=0.0.2
+Pillow>=9.0.0
+
+# Performance optimizations
+optimum>=1.16.0     # Hugging Face optimization tools
+# Note: Using built-in SDPA (Scaled Dot Product Attention) from PyTorch 2.0+
+#       Flash Attention requires compilation and is optional
+
+# Audio processing
+openai-whisper>=20230314
+piper-tts>=1.2.0

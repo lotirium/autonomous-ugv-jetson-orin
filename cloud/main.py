@@ -152,7 +152,12 @@ class RobotConnection:
     async def handle_image(self, websocket: WebSocketServerProtocol, msg: dict):
         """Store latest camera frame from robot."""
         try:
-            self.last_image = base64.b64decode(msg.get('image_base64', ''))
+            img_data = msg.get('image_base64', '')
+            if img_data:
+                self.last_image = base64.b64decode(img_data)
+                logger.debug(f"📷 Image received ({len(self.last_image)} bytes)")
+            else:
+                logger.warning("Empty image_base64 in message")
         except Exception as e:
             logger.error(f"Image error: {e}")
     
@@ -188,6 +193,13 @@ class RobotConnection:
         if use_vision is None:
             vision_keywords = ['see', 'look', 'what is', 'who is', 'describe', 'camera', 'front']
             use_vision = any(kw in query.lower() for kw in vision_keywords)
+        
+        # Log vision status
+        if use_vision:
+            if self.last_image:
+                logger.info(f"👁️  Using vision (image: {len(self.last_image)} bytes)")
+            else:
+                logger.warning("👁️  Vision requested but no image available!")
         
         try:
             if use_vision and self.last_image:
