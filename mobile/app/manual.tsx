@@ -79,15 +79,32 @@ export default function ManualScreen() {
                return;
           }
 
+          // Close any existing connection
+          if (wsRef.current) {
+               wsRef.current.close();
+               wsRef.current = null;
+          }
+
           setIsConnecting(true);
           setError(null);
 
           console.log('Connecting to WebSocket:', wsUrl);
 
+          // Set a connection timeout
+          const connectionTimeout = setTimeout(() => {
+               if (wsRef.current && wsRef.current.readyState === WebSocket.CONNECTING) {
+                    console.log('WebSocket connection timeout');
+                    wsRef.current.close();
+                    setError('Connection timeout - check robot is online');
+                    setIsConnecting(false);
+               }
+          }, 10000); // 10 second timeout
+
           const ws = new WebSocket(wsUrl);
           wsRef.current = ws;
 
           ws.onopen = () => {
+               clearTimeout(connectionTimeout);
                console.log('WebSocket connected');
                setIsConnecting(false);
                setIsStreaming(true);
@@ -114,19 +131,26 @@ export default function ManualScreen() {
           };
 
           ws.onerror = (event) => {
+               clearTimeout(connectionTimeout);
                console.error('WebSocket error:', event);
-               setError('WebSocket connection error');
+               setError('Cannot reach robot camera - verify connection');
                setIsConnecting(false);
                setIsStreaming(false);
           };
 
           ws.onclose = (event) => {
+               clearTimeout(connectionTimeout);
                console.log('WebSocket closed:', event.code, event.reason);
                setIsStreaming(false);
                setIsConnecting(false);
 
+               // Provide helpful error messages based on close code
                if (!event.wasClean) {
-                    setError(`Connection closed unexpectedly (${event.code})`);
+                    if (event.code === 1006) {
+                         setError('Robot not reachable - check WiFi connection');
+                    } else {
+                         setError(`Connection lost (code ${event.code})`);
+                    }
                }
           };
      }, [wsUrl]);
@@ -260,13 +284,29 @@ export default function ManualScreen() {
                          />
                     </View>
 
+                    {/* Connection status */}
+                    <View style={styles.connectionStatus}>
+                         <View style={[
+                              styles.connectionDot,
+                              { backgroundColor: isStreaming ? '#34D399' : isConnecting ? '#FBBF24' : '#EF4444' }
+                         ]} />
+                         <ThemedText style={styles.connectionText}>
+                              {isConnecting ? 'Connecting...' : isStreaming ? 'Live' : 'Disconnected'}
+                         </ThemedText>
+                         {baseUrl && (
+                              <ThemedText style={styles.connectionUrl}>
+                                   {baseUrl.replace(/^https?:\/\//, '')}
+                              </ThemedText>
+                         )}
+                    </View>
+
                     <View style={styles.row}>
                          <Pressable
                               style={styles.secondaryButton}
                               onPress={handleToggleStream}
                          >
                               <ThemedText>
-                                   {isStreaming ? 'Reconnect' : 'Connect'}
+                                   {isConnecting ? 'Cancel' : isStreaming ? 'Reconnect' : 'Connect'}
                               </ThemedText>
                          </Pressable>
                          <Pressable style={styles.primaryButton} onPress={handleSnapshot}>
@@ -345,6 +385,32 @@ const styles = StyleSheet.create({
           flexDirection: 'row',
           gap: 16,
           alignItems: 'center',
+     },
+     connectionStatus: {
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: 8,
+          paddingVertical: 8,
+          paddingHorizontal: 12,
+          backgroundColor: '#1A1A1A',
+          borderWidth: 1,
+          borderColor: '#252525',
+     },
+     connectionDot: {
+          width: 8,
+          height: 8,
+          borderRadius: 4,
+     },
+     connectionText: {
+          fontSize: 13,
+          color: '#D1D5DB',
+          fontFamily: 'JetBrainsMono_500Medium',
+     },
+     connectionUrl: {
+          fontSize: 12,
+          color: '#67686C',
+          fontFamily: 'JetBrainsMono_400Regular',
+          marginLeft: 'auto',
      },
      videoFeed: {
           position: "relative",

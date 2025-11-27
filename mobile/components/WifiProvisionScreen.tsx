@@ -26,6 +26,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
 import { DEFAULT_ROBOT_BASE_URL, useRobot } from "@/context/robot-provider";
+import { discoverRobots, DiscoveredRobot } from "@/services/network-discovery";
 import { createRobotApi } from "@/services/robot-api";
 import { checkAllRobotsStatus } from "@/services/robot-status-check";
 import { RobotStatusCheck as RobotStatusCheckType } from "@/services/robot-storage";
@@ -33,7 +34,8 @@ import { Image } from "expo-image";
 import { IconSymbol } from "./ui/icon-symbol";
 
 // Hotspot provisioning config (replaces Bluetooth)
-const HOTSPOT_SSID = "ROVY-Setup";
+// Supports multiple hotspot names for different robot configurations
+const HOTSPOT_SSIDS = ["ROVY-Setup", "UGV", "UGV-Setup", "ROVY"];
 const HOTSPOT_IP = "192.168.4.1";
 const HOTSPOT_URL = `http://${HOTSPOT_IP}`;
 
@@ -199,6 +201,11 @@ export function WifiProvisionScreen() {
   const [isManualConnecting, setIsManualConnecting] = useState(false);
   const [savedRobots, setSavedRobots] = useState<RobotStatusCheckType[]>([]);
   const [isCheckingRobots, setIsCheckingRobots] = useState(false);
+  const [discoveredRobots, setDiscoveredRobots] = useState<DiscoveredRobot[]>([]);
+  const [isDiscovering, setIsDiscovering] = useState(false);
+  const [discoveryProgress, setDiscoveryProgress] = useState<{ scanned: number; total: number } | null>(null);
+  const [hasScannedNetwork, setHasScannedNetwork] = useState(false);
+  const discoveryAbortRef = useRef<AbortController | null>(null);
   const [robotWifiNetworks, setRobotWifiNetworks] = useState<
     { ssid: string; rssi: number }[]
   >([]);
@@ -289,8 +296,8 @@ export function WifiProvisionScreen() {
         setIsHotspotMode(true);
       } else {
         Alert.alert(
-          "Connect to ROVY-Setup",
-          `To set up your robot:\n\n1. Open WiFi settings\n2. Connect to "${HOTSPOT_SSID}"\n3. Password: rovysetup\n4. Come back and tap Scan again`,
+          "Connect to Robot Hotspot",
+          `To set up your robot:\n\n1. Open WiFi settings\n2. Connect to one of: ${HOTSPOT_SSIDS.join(", ")}\n3. Come back and tap Scan again`,
           [{ text: "OK" }]
         );
       }
@@ -378,7 +385,7 @@ export function WifiProvisionScreen() {
         } else {
           Alert.alert(
             "Connection Lost",
-            `Please reconnect to "${HOTSPOT_SSID}" WiFi and try again.`
+            `Please reconnect to the robot hotspot WiFi and try again.`
           );
           setSelectedDevice(null);
         }
@@ -526,6 +533,91 @@ export function WifiProvisionScreen() {
     }
   }, [manualIpInput, refreshStatus, router, setBaseUrl, connectToStoredRobot]);
 
+  /**
+   * Discover robots on the same network
+   */
+  const handleDiscoverNetwork = useCallback(async () => {
+    // Cancel any existing discovery
+    discoveryAbortRef.current?.abort();
+    discoveryAbortRef.current = new AbortController();
+
+    setIsDiscovering(true);
+    setDiscoveryProgress({ scanned: 0, total: 254 });
+    setDiscoveredRobots([]);
+    setHasScannedNetwork(true);
+
+    try {
+      const result = await discoverRobots({
+        signal: discoveryAbortRef.current.signal,
+        onProgress: (scanned, total, found) => {
+          setDiscoveryProgress({ scanned, total });
+          setDiscoveredRobots([...found]);
+        },
+      });
+
+      setDiscoveredRobots(result.robots);
+      
+      if (result.robots.length === 0) {
+        // No robots found - show helpful message via alert
+        Alert.alert(
+          "No Robots Found",
+          "Make sure your robot is powered on and connected to the same WiFi network as your phone.",
+          [{ text: "OK" }]
+        );
+      }
+    } catch (error) {
+      if ((error as Error).name !== "AbortError") {
+        console.error("Network discovery failed:", error);
+        Alert.alert(
+          "Discovery Failed",
+          error instanceof Error ? error.message : "Failed to scan network"
+        );
+      }
+    } finally {
+      setIsDiscovering(false);
+      setDiscoveryProgress(null);
+      discoveryAbortRef.current = null;
+    }
+  }, []);
+
+  /**
+   * Connect to a discovered robot
+   */
+  const handleConnectToDiscovered = useCallback(
+    async (robot: DiscoveredRobot) => {
+      setIsManualConnecting(true);
+      try {
+        // Check if this is a previously stored robot
+        const connected = await connectToStoredRobot(robot.baseUrl);
+        if (connected) {
+          await refreshStatus();
+          router.push("/(tabs)/home");
+          return;
+        }
+
+        // New robot - set up connection
+        setBaseUrl(robot.baseUrl);
+        await refreshStatus();
+        router.replace("/wifi");
+      } catch (error) {
+        Alert.alert(
+          "Connection Failed",
+          error instanceof Error ? error.message : "Failed to connect to robot"
+        );
+      } finally {
+        setIsManualConnecting(false);
+      }
+    },
+    [connectToStoredRobot, refreshStatus, router, setBaseUrl]
+  );
+
+  // Cancel discovery on unmount
+  useEffect(() => {
+    return () => {
+      discoveryAbortRef.current?.abort();
+    };
+  }, []);
+
   // Load and check saved robots on mount
   useEffect(() => {
     let mounted = true;
@@ -549,12 +641,21 @@ export function WifiProvisionScreen() {
     };
   }, []);
 
-  // Refresh phone network on mount (only once)
+  // Auto-discover robots on mount
   useEffect(() => {
     let mounted = true;
     void (async () => {
       try {
         await refreshPhoneNetwork();
+        
+        // Auto-run network discovery after a brief delay
+        if (mounted && !hasScannedNetwork) {
+          setTimeout(() => {
+            if (mounted) {
+              handleDiscoverNetwork();
+            }
+          }, 500);
+        }
       } catch (error) {
         if (mounted) {
           console.warn("Failed to refresh phone network on mount:", error);
@@ -564,7 +665,8 @@ export function WifiProvisionScreen() {
     return () => {
       mounted = false;
     };
-  }, [refreshPhoneNetwork]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const getStatusText = (): string => {
     switch (wifiStatus) {
@@ -790,11 +892,88 @@ export function WifiProvisionScreen() {
             </ThemedView>
           ) : null}
 
+          {/* Network Discovery Section - Primary method when robot is on same WiFi */}
+          <ThemedView style={styles.sectionCard}>
+            <View style={styles.sectionHeader}>
+              <View>
+                <ThemedText style={styles.sectionTitle}>
+                  Find on Network
+                </ThemedText>
+                <ThemedText style={styles.sectionHint}>
+                  Scan for robots on your WiFi
+                </ThemedText>
+              </View>
+              <Pressable
+                style={[
+                  styles.primaryButton,
+                  isDiscovering && styles.disabledPrimary,
+                ]}
+                onPress={handleDiscoverNetwork}
+                disabled={isDiscovering}
+              >
+                {isDiscovering ? (
+                  <ActivityIndicator color="#04110B" size="small" />
+                ) : (
+                  <ThemedText style={styles.primaryButtonText}>
+                    Scan
+                  </ThemedText>
+                )}
+              </Pressable>
+            </View>
+
+            {isDiscovering && discoveryProgress && (
+              <View style={styles.inlineStatus}>
+                <ActivityIndicator size="small" color="#1DD1A1" />
+                <ThemedText style={styles.statusLabelText}>
+                  Scanning network... {discoveryProgress.scanned}/{discoveryProgress.total}
+                </ThemedText>
+              </View>
+            )}
+
+            {discoveredRobots.length > 0 && (
+              <View style={styles.robotList}>
+                {discoveredRobots.map((robot) => (
+                  <Pressable
+                    key={robot.baseUrl}
+                    style={styles.robotItem}
+                    onPress={() => handleConnectToDiscovered(robot)}
+                  >
+                    <View style={styles.robotItemContent}>
+                      <View style={styles.robotItemHeader}>
+                        <ThemedText style={styles.robotName}>
+                          {robot.name || "ROVY Robot"}
+                        </ThemedText>
+                        <StatusPill color="#1DD1A1" label="Online" />
+                      </View>
+                      <ThemedText style={styles.robotSubtitle}>
+                        {robot.ip}:{robot.port} • {robot.responseTimeMs}ms
+                      </ThemedText>
+                    </View>
+                    <IconSymbol
+                      size={20}
+                      name="chevron.right"
+                      color="#67686C"
+                    />
+                  </Pressable>
+                ))}
+              </View>
+            )}
+
+            {hasScannedNetwork && !isDiscovering && discoveredRobots.length === 0 && (
+              <ThemedText style={styles.emptyStateText}>
+                No robots found on this network. Try hotspot setup below.
+              </ThemedText>
+            )}
+          </ThemedView>
+
           <View>
             <View style={styles.sectionHeader}>
               <View>
                 <ThemedText style={styles.sectionTitle}>
                   Hotspot Setup
+                </ThemedText>
+                <ThemedText style={styles.sectionHint}>
+                  For first-time WiFi configuration
                 </ThemedText>
               </View>
               <StatusPill
