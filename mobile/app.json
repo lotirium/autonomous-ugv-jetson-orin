@@ -3,7 +3,7 @@
     "name": "Jarvis Controller",
     "slug": "Jarvis Controller",
     "version": "1.0.0",
-    "orientation": "portrait",
+    "orientation": "default",
     "scheme": "jarviscontroller",
     "icon": "./assets/images/icons/ios-light.png",
     "userInterfaceStyle": "dark",
@@ -51,6 +51,7 @@
         }
       ],
       "expo-secure-store",
+      "expo-screen-orientation",
       "./plugins/withAndroidBuildGradleTweaks"
     ],
     "experiments": {
