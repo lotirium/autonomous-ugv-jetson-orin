@@ -9,6 +9,15 @@ echo "================================"
 echo "  ROVY ROBOT STARTUP"
 echo "================================"
 
+# Activate virtual environment
+VENV_PATH="/home/rovy/rovy_client/venv"
+if [ -d "$VENV_PATH" ]; then
+    source "$VENV_PATH/bin/activate"
+    echo "✓ Virtual environment activated"
+else
+    echo "WARNING: Virtual environment not found at $VENV_PATH"
+fi
+
 # Check Python
 if ! command -v python3 &> /dev/null; then
     echo "ERROR: Python3 not found"
