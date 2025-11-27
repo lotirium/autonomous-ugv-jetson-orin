@@ -469,6 +469,15 @@ def _create_camera_service() -> CameraService:
 
 app.state.camera_service = _create_camera_service()
 
+# Initialize dedicated OAK-D camera for AI vision (separate from streaming)
+app.state.oakd_camera = None
+if DepthAICameraSource.is_available():
+    try:
+        app.state.oakd_camera = DepthAICameraSource()
+        LOGGER.info("✅ OAK-D camera initialized for AI vision")
+    except CameraError as exc:
+        LOGGER.warning("❌ OAK-D camera initialization failed: %s", exc)
+
 # Initialize face recognition service
 if FACE_RECOGNITION_AVAILABLE:
     try:
@@ -1109,27 +1118,54 @@ async def speak_text(request: dict):
         raise HTTPException(status_code=503, detail="TTS not available")
 
 
+def _capture_oakd_frame() -> bytes:
+    """Capture a single frame from OAK-D camera."""
+    if not DepthAICameraSource.is_available():
+        raise CameraError("DepthAI not available")
+    
+    import depthai as dai
+    import cv2
+    
+    # Create pipeline for single frame capture
+    pipeline = dai.Pipeline()
+    
+    # Configure ColorCamera
+    cam_rgb = pipeline.create(dai.node.ColorCamera)
+    cam_rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
+    cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+    cam_rgb.setInterleaved(False)
+    cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+    
+    # Create XLinkOut
+    xout_rgb = pipeline.create(dai.node.XLinkOut)
+    xout_rgb.setStreamName("rgb")
+    
+    # Link camera video to output
+    cam_rgb.video.link(xout_rgb.input)
+    
+    # Connect to device and get one frame
+    with dai.Device(pipeline) as device:
+        q_rgb = device.getOutputQueue(name="rgb", maxSize=1, blocking=True)
+        frame = q_rgb.get().getCvFrame()
+        
+        # Encode to JPEG
+        _, encoded = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        return encoded.tobytes()
+
+
 @app.get("/shot")
 async def single_frame() -> Response:
     """Serve a single JPEG frame from OAK-D camera for AI vision."""
     try:
-        # Use OAK-D directly for AI vision (separate from streaming)
-        if not DepthAICameraSource.is_available():
-            raise HTTPException(status_code=503, detail="OAK-D camera not available")
-        
-        # Create a temporary OAK-D source for this single frame
-        oakd_source = DepthAICameraSource()
-        try:
-            frame = await oakd_source.get_jpeg_frame()
-            return Response(content=frame, media_type="image/jpeg")
-        finally:
-            await oakd_source.close()
+        # Capture frame in thread to avoid blocking
+        frame = await anyio.to_thread.run_sync(_capture_oakd_frame)
+        return Response(content=frame, media_type="image/jpeg")
     except CameraError as e:
         LOGGER.error(f"Failed to get OAK-D frame: {e}")
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
-        LOGGER.error(f"Unexpected error getting frame: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        LOGGER.error(f"Unexpected error getting OAK-D frame: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 async def _camera_stream(service: CameraService, frames: int | None) -> AsyncIterator[bytes]:
