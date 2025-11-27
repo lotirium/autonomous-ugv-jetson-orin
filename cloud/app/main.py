@@ -29,6 +29,7 @@ if str(_project_root) not in sys.path:
 from ble import WifiManager
 
 import anyio
+import httpx
 from fastapi import FastAPI, HTTPException, Header, Query, Request, Response, WebSocket, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -579,22 +580,32 @@ async def camera_websocket(websocket: WebSocket):
     LOGGER.info("WebSocket client connected")
     
     try:
-        state = oak_ensure_runtime()
-        capture = state.capture
+        # Use the existing camera service instead of oak_stream
+        camera_service = app.state.camera_service
+        if not camera_service:
+            await websocket.send_text(json.dumps({"error": "Camera not available"}))
+            await websocket.close()
+            return
+            
+        LOGGER.info("Using main camera service for WebSocket stream")
         
         while True:
-            ret, frame = capture.read()
-            if not ret or frame is None:
-                LOGGER.debug("Failed to read frame from camera; closing WebSocket")
-                await websocket.send_text(json.dumps({"error": "Failed to read frame"}))
-                break
-                
-            # Encode frame to JPEG
-            payload = oak_frame_to_jpeg(frame)
-            if payload:
-                # Send as JSON with base64 frame
-                b64_frame = base64.b64encode(payload).decode('utf-8')
-                await websocket.send_text(json.dumps({"frame": b64_frame}))  # Send as JSON
+            try:
+                # Get frame from the camera service
+                frame_bytes = await camera_service.get_frame()
+                if frame_bytes:
+                    # Send as JSON with base64 frame
+                    b64_frame = base64.b64encode(frame_bytes).decode('utf-8')
+                    await websocket.send_text(json.dumps({"frame": b64_frame}))
+                else:
+                    LOGGER.debug("No frame available from camera")
+                    await asyncio.sleep(0.1)
+                    continue
+                    
+            except Exception as frame_error:
+                LOGGER.warning(f"Frame capture error: {frame_error}")
+                await asyncio.sleep(0.1)
+                continue
             
             # Control frame rate (e.g., 10 FPS)
             await asyncio.sleep(0.1)
@@ -784,19 +795,28 @@ async def voice_websocket(websocket: WebSocket):
                                     response = await anyio.to_thread.run_sync(
                                         assistant.ask, transcript
                                     )
+                                    LOGGER.info(f"🤖 AI Response: {response}")
+                                    
                                     await websocket.send_json({
                                         "type": "response",
                                         "text": response
                                     })
                                     
-                                    # Also send to robot for TTS playback
+                                    # Send TTS command to Pi speakers via HTTP
                                     try:
-                                        import sys
-                                        sys.path.insert(0, str(Path(__file__).parent.parent))
-                                        from main import broadcast_to_robot
-                                        await broadcast_to_robot(response)
-                                    except Exception as e:
-                                        LOGGER.warning(f"Could not broadcast to robot: {e}")
+                                        # Get Pi IP from environment or use default
+                                        pi_ip = os.getenv("ROVY_ROBOT_IP", "100.72.107.106")
+                                        pi_url = f"http://{pi_ip}:8000/speak"
+                                        LOGGER.info(f"🔊 Sending TTS to Pi at {pi_url}...")
+                                        
+                                        async with httpx.AsyncClient(timeout=10.0) as client:
+                                            pi_response = await client.post(pi_url, json={"text": response})
+                                            if pi_response.status_code == 200:
+                                                LOGGER.info("✅ TTS played on Pi speakers")
+                                            else:
+                                                LOGGER.warning(f"Pi TTS returned status {pi_response.status_code}")
+                                    except Exception as tts_error:
+                                        LOGGER.error(f"Failed to send TTS to Pi: {tts_error}")
                                 else:
                                     await websocket.send_json({
                                         "type": "response",

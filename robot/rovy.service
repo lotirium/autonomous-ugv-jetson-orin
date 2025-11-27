@@ -15,7 +15,7 @@ StandardError=journal
 
 # Environment
 Environment=PYTHONUNBUFFERED=1
-Environment=CAMERA_DEVICE=0
+Environment=CAMERA_DEVICE=1
 Environment=ROVER_SERIAL_DEVICE=/dev/ttyAMA0
 
 [Install]
