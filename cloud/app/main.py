@@ -789,12 +789,42 @@ async def voice_websocket(websocket: WebSocket):
                                     "text": transcript
                                 })
                                 
-                                # Get AI response
+                                # Get AI response (with vision if asking about camera/image)
                                 assistant = _get_assistant()
                                 if assistant:
-                                    response = await anyio.to_thread.run_sync(
-                                        assistant.ask, transcript
-                                    )
+                                    # Check if query needs vision
+                                    vision_keywords = ['see', 'camera', 'image', 'look', 'show', 'what', 'view']
+                                    use_vision = any(keyword in transcript.lower() for keyword in vision_keywords)
+                                    
+                                    if use_vision:
+                                        # Fetch latest frame from Pi camera
+                                        try:
+                                            pi_ip = os.getenv("ROVY_ROBOT_IP", "100.72.107.106")
+                                            frame_url = f"http://{pi_ip}:8000/shot"
+                                            LOGGER.info(f"📷 Fetching frame from Pi: {frame_url}")
+                                            
+                                            async with httpx.AsyncClient(timeout=5.0) as client:
+                                                frame_response = await client.get(frame_url)
+                                                if frame_response.status_code == 200:
+                                                    image_bytes = frame_response.content
+                                                    response = await anyio.to_thread.run_sync(
+                                                        assistant.ask, transcript, image_bytes
+                                                    )
+                                                else:
+                                                    LOGGER.warning(f"Failed to get frame: {frame_response.status_code}")
+                                                    response = await anyio.to_thread.run_sync(
+                                                        assistant.ask, transcript
+                                                    )
+                                        except Exception as frame_error:
+                                            LOGGER.error(f"Error fetching frame: {frame_error}")
+                                            response = await anyio.to_thread.run_sync(
+                                                assistant.ask, transcript
+                                            )
+                                    else:
+                                        response = await anyio.to_thread.run_sync(
+                                            assistant.ask, transcript
+                                        )
+                                    
                                     LOGGER.info(f"🤖 AI Response: {response}")
                                     
                                     await websocket.send_json({
