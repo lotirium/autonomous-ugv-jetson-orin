@@ -237,9 +237,9 @@ export default function ManualScreen() {
                const normalizedX = joystickX.value / JOYSTICK_MAX_DISTANCE;
                const normalizedY = -joystickY.value / JOYSTICK_MAX_DISTANCE; // Invert Y
 
-               // Tank drive calculation
-               const leftSpeed = (normalizedY + normalizedX) * max_speed;
-               const rightSpeed = (normalizedY - normalizedX) * max_speed;
+               // Tank drive calculation (negated for reversed motors)
+               const leftSpeed = -(normalizedY + normalizedX) * max_speed;
+               const rightSpeed = -(normalizedY - normalizedX) * max_speed;
 
                runOnJS(sendMovement)(leftSpeed, rightSpeed);
           })
