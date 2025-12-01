@@ -18,6 +18,7 @@ class HealthResponse(BaseModel):
     claimed: bool = Field(..., description="Whether the robot is currently claimed")
     mode: Mode = Field(..., description="Current connectivity mode")
     version: str = Field(..., description="Firmware/software version")
+    battery: Optional[conint(ge=0, le=100)] = Field(None, description="Battery percentage (0-100)")
 
 
 class NetworkInfoResponse(BaseModel):

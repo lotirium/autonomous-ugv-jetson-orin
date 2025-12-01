@@ -393,17 +393,25 @@ def _iter_webcam_candidates() -> list[int | str]:
         except ValueError:
             candidates.append(_WEBCAM_DEVICE)
 
+    # Prefer stable /dev/v4l/by-id/ paths over numeric indices
+    # Use the by-id path directly (not resolved) so it stays stable even if device re-enumerates
     by_id_dir = Path("/dev/v4l/by-id")
     if by_id_dir.is_dir():
         for entry in sorted(by_id_dir.iterdir()):
             name = entry.name.lower()
-            if "oak" not in name and "depthai" not in name and "luxonis" not in name:
+            # Skip OAK-D devices (reserved for AI vision)
+            if "oak" in name or "depthai" in name or "luxonis" in name:
                 continue
-            try:
-                resolved = entry.resolve(strict=True)
-            except OSError:
-                continue
-            candidates.append(str(resolved))
+            # Use any USB camera with video-index0 (main video stream)
+            if "usb" in name and "video-index0" in name:
+                try:
+                    # Use the stable by-id path directly, not the resolved /dev/videoX path
+                    # This way if the device re-enumerates, the path still works
+                    stable_path = str(entry)
+                    candidates.append(stable_path)
+                    LOGGER.info(f"Found stable USB camera device: {entry.name} (using stable path)")
+                except OSError:
+                    continue
 
     # Fall back to common numeric indices if nothing more specific was found.
     # These entries are appended after any explicit or detected OAK-D devices
@@ -448,13 +456,13 @@ def _create_camera_service() -> CameraService:
             "OpenCV package not installed; skipping USB camera stream. Install the 'opencv-python' package to enable it."
         )
 
-    # Fallback to OAK-D only if USB camera is not available
-    if primary_source is None and DepthAICameraSource.is_available():
-        try:
-            primary_source = DepthAICameraSource()
-            LOGGER.info("Using DepthAI camera source for streaming (USB camera unavailable)")
-        except CameraError as exc:
-            LOGGER.warning("DepthAI camera source unavailable: %s", exc)
+    # Do NOT use OAK-D for streaming - it's reserved for AI vision via /shot endpoint
+    # if primary_source is None and DepthAICameraSource.is_available():
+    #     try:
+    #         primary_source = DepthAICameraSource()
+    #         LOGGER.info("Using DepthAI camera source for streaming (USB camera unavailable)")
+    #     except CameraError as exc:
+    #         LOGGER.warning("DepthAI camera source unavailable: %s", exc)
 
     fallback_source = None
     if _PLACEHOLDER_JPEG:
@@ -470,15 +478,19 @@ def _create_camera_service() -> CameraService:
 app.state.camera_service = _create_camera_service()
 
 # Initialize persistent OAK-D camera for fast AI vision snapshots
-app.state.oakd_device = None
-app.state.oakd_queue = None
+# Now safe because USB camera and OAK-D are on separate USB buses
 if DepthAICameraSource.is_available():
     try:
         import depthai as dai
         
-        LOGGER.info("🔧 Initializing persistent OAK-D for AI vision...")
+        LOGGER.info("🔧 Initializing persistent OAK-D for fast AI vision...")
         
-        # Create persistent pipeline for preview frames (not MJPEG)
+        # Force release any stale OAK-D devices from previous runs
+        DepthAICameraSource.force_release_devices()
+        import time
+        time.sleep(1.0)  # Give USB time to stabilize
+        
+        # Create persistent pipeline for preview frames
         pipeline = dai.Pipeline()
         
         cam_rgb = pipeline.create(dai.node.ColorCamera)
@@ -486,20 +498,28 @@ if DepthAICameraSource.is_available():
         cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
         cam_rgb.setInterleaved(False)
         cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+        cam_rgb.setIspScale(1, 3)  # Downscale to 640x360 for speed
+        cam_rgb.setFps(30)  # Set explicit FPS for stable streaming
         
         xout_rgb = pipeline.create(dai.node.XLinkOut)
         xout_rgb.setStreamName("preview")
+        xout_rgb.setMetadataOnly(False)
         cam_rgb.preview.link(xout_rgb.input)
         
         # Start device and keep it running
         app.state.oakd_device = dai.Device(pipeline)
+        # Use larger queue and blocking mode for more reliable frame retrieval
         app.state.oakd_queue = app.state.oakd_device.getOutputQueue(name="preview", maxSize=4, blocking=False)
         
-        LOGGER.info("✅ OAK-D camera initialized for AI vision (persistent)")
+        LOGGER.info("✅ OAK-D camera initialized for fast AI vision (persistent)")
     except Exception as exc:
         LOGGER.warning(f"❌ OAK-D initialization failed: {exc}")
         app.state.oakd_device = None
         app.state.oakd_queue = None
+else:
+    LOGGER.warning("⚠️  DepthAI not available - /shot endpoint will not work")
+    app.state.oakd_device = None
+    app.state.oakd_queue = None
 
 # Initialize face recognition service
 if FACE_RECOGNITION_AVAILABLE:
@@ -595,8 +615,12 @@ async def root() -> dict[str, object]:
 @app.get("/video")
 async def video_stream() -> StreamingResponse:
     """Expose the main MJPEG stream at the top level for convenience."""
-
-    return oak_video_response()
+    # Use camera service (USB webcam) instead of oak_stream to free up OAK-D for /shot endpoint
+    async def stream_generator() -> AsyncIterator[bytes]:
+        async for chunk in _camera_stream(app.state.camera_service, None):
+            yield chunk
+    
+    return StreamingResponse(stream_generator(), media_type=f"multipart/x-mixed-replace; boundary={BOUNDARY}")
 
 
 @app.websocket("/camera/ws")
@@ -1059,7 +1083,27 @@ async def text_to_speech(request: dict):
 # Piper TTS for local speech on Pi
 _piper_voice = None
 PIPER_MODEL_PATH = "/home/rovy/rovy_client/models/piper/en_US-hfc_male-medium.onnx"
-AUDIO_DEVICE = "plughw:2,0"  # USB speaker (card 2: UACDemoV1.0)
+
+def _get_audio_device():
+    """Auto-detect USB audio device."""
+    try:
+        result = subprocess.run(['aplay', '-l'], capture_output=True, text=True, timeout=2)
+        for line in result.stdout.split('\n'):
+            if 'UACDemo' in line or 'USB Audio' in line:
+                # Extract card number from line like "card 3: UACDemoV10..."
+                parts = line.split(':')
+                if len(parts) >= 1 and 'card' in parts[0]:
+                    card_num = parts[0].split('card')[1].strip()
+                    device = f"plughw:{card_num},0"
+                    LOGGER.info(f"🔊 Auto-detected USB audio device: {device}")
+                    return device
+    except Exception as e:
+        LOGGER.warning(f"Failed to auto-detect audio device: {e}")
+    
+    # Fallback to default
+    return "plughw:2,0"
+
+AUDIO_DEVICE = _get_audio_device()
 
 
 def _get_piper_voice():
@@ -1091,12 +1135,28 @@ def _speak_with_piper(text: str) -> bool:
         return False
     
     try:
+        # Clean text for TTS (remove special characters that might break Piper)
+        clean_text = text.strip()
+        # Remove markdown formatting, asterisks, etc
+        clean_text = clean_text.replace('*', '').replace('#', '').replace('_', '')
+        # Remove parentheses and brackets
+        clean_text = clean_text.replace('(', '').replace(')', '').replace('[', '').replace(']', '')
+        
+        LOGGER.debug(f"TTS cleaned text (first 100 chars): {clean_text[:100]}")
+        
         # Synthesize audio
         audio_bytes = b''
         sample_rate = 22050
-        for chunk in voice.synthesize(text):
+        for chunk in voice.synthesize(clean_text):
             audio_bytes += chunk.audio_int16_bytes
             sample_rate = chunk.sample_rate
+        
+        # Verify audio was generated
+        if not audio_bytes or len(audio_bytes) < 100:
+            LOGGER.error(f"Piper generated insufficient audio: {len(audio_bytes)} bytes")
+            return False
+        
+        LOGGER.info(f"Generated {len(audio_bytes)} bytes of audio at {sample_rate}Hz")
         
         # Save to temp WAV file
         with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
@@ -1108,15 +1168,18 @@ def _speak_with_piper(text: str) -> bool:
                 wf.writeframes(audio_bytes)
         
         # Play through speaker
-        subprocess.run(
+        result = subprocess.run(
             ['aplay', '-D', AUDIO_DEVICE, wav_path],
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
             timeout=30
         )
         
+        if result.returncode != 0:
+            LOGGER.error(f"aplay failed with code {result.returncode}: {result.stderr.decode()}")
+        
         # Cleanup
         os.unlink(wav_path)
-        return True
+        return result.returncode == 0
         
     except Exception as e:
         LOGGER.error(f"Piper speak error: {e}")
@@ -1143,31 +1206,107 @@ async def speak_text(request: dict):
         raise HTTPException(status_code=503, detail="TTS not available")
 
 
-def _capture_oakd_frame() -> bytes:
-    """Capture a single frame from persistent OAK-D camera queue."""
+def _reinit_persistent_oakd():
+    """Reinitialize persistent OAK-D if it's corrupted."""
+    import depthai as dai
+    
+    LOGGER.warning("Reinitializing corrupted OAK-D pipeline...")
+    
+    # Close existing device
+    if app.state.oakd_device is not None:
+        try:
+            app.state.oakd_device.close()
+        except:
+            pass
+        app.state.oakd_device = None
+        app.state.oakd_queue = None
+    
+    # Force release and wait
+    DepthAICameraSource.force_release_devices()
+    import time
+    time.sleep(0.5)
+    
+    # Recreate pipeline
+    pipeline = dai.Pipeline()
+    
+    cam_rgb = pipeline.create(dai.node.ColorCamera)
+    cam_rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
+    cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+    cam_rgb.setInterleaved(False)
+    cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+    cam_rgb.setIspScale(1, 3)
+    cam_rgb.setFps(30)
+        
+    xout_rgb = pipeline.create(dai.node.XLinkOut)
+    xout_rgb.setStreamName("preview")
+    xout_rgb.setMetadataOnly(False)
+    cam_rgb.preview.link(xout_rgb.input)
+    
+    app.state.oakd_device = dai.Device(pipeline)
+    app.state.oakd_queue = app.state.oakd_device.getOutputQueue(name="preview", maxSize=4, blocking=False)
+    
+    LOGGER.info("✅ OAK-D pipeline reinitialized")
+
+
+async def _capture_oakd_snapshot() -> bytes:
+    """Capture a single snapshot from persistent OAK-D camera (fast!) with auto-recovery."""
     import cv2
+    import time as time_module
     
     if app.state.oakd_queue is None:
         raise CameraError("OAK-D camera not initialized")
     
-    # Get latest frame from persistent queue (non-blocking)
-    frame_data = app.state.oakd_queue.get()
-    if frame_data is None:
-        raise CameraError("No frame available from OAK-D")
+    # Get latest frame from persistent queue (very fast - no device initialization!)
+    def get_frame_sync():
+        # Try to get the latest frame
+        max_attempts = 20
+        for attempt in range(max_attempts):
+            try:
+                frame_data = app.state.oakd_queue.tryGet()
+                if frame_data is not None:
+                    # Convert to OpenCV frame
+                    frame = frame_data.getCvFrame()
+                    if frame is None or frame.size == 0:
+                        raise CameraError("Empty frame from OAK-D")
+                    
+                    # Encode to JPEG
+                    success, encoded = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    if not success:
+                        raise CameraError("Failed to encode frame as JPEG")
+                    
+                    LOGGER.info(f"✅ Captured OAK-D snapshot ({len(encoded.tobytes())} bytes) - FAST MODE")
+                    return encoded.tobytes()
+            except Exception as e:
+                # Check if it's an X_LINK error - pipeline might be corrupted
+                if "X_LINK_ERROR" in str(e) or "Communication exception" in str(e):
+                    LOGGER.warning(f"OAK-D pipeline corrupted, attempting recovery...")
+                    try:
+                        _reinit_persistent_oakd()
+                        # Give new pipeline time to start
+                        time_module.sleep(1.0)
+                        # Retry with new pipeline
+                        continue
+                    except Exception as reinit_error:
+                        raise CameraError(f"Failed to reinitialize OAK-D: {reinit_error}")
+                
+                if attempt == max_attempts - 1:
+                    raise CameraError(f"Failed to get frame from OAK-D: {e}")
+            
+            # Wait a bit for next frame
+            time_module.sleep(0.05)
+        
+        raise CameraError("No frame available from OAK-D after multiple attempts")
     
-    frame = frame_data.getCvFrame()
-    
-    # Encode to JPEG
-    _, encoded = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    return encoded.tobytes()
+    return await anyio.to_thread.run_sync(get_frame_sync)
+
 
 
 @app.get("/shot")
 async def single_frame() -> Response:
     """Serve a single JPEG frame from OAK-D camera for AI vision."""
     try:
-        # Capture frame from persistent queue (fast!)
-        frame = await anyio.to_thread.run_sync(_capture_oakd_frame)
+        # Capture frame using temporary OAK-D instance
+        frame = await _capture_oakd_snapshot()
         return Response(content=frame, media_type="image/jpeg")
     except CameraError as e:
         LOGGER.error(f"Failed to get OAK-D frame: {e}")
@@ -1200,6 +1339,17 @@ async def shutdown_camera() -> None:
 
 @app.get("/health", response_model=HealthResponse, tags=["Discovery"])
 async def get_health() -> HealthResponse:
+    # Try to get battery information
+    battery_percent = None
+    base_controller = _get_base_controller()
+    
+    if base_controller and hasattr(base_controller, "get_status"):
+        try:
+            rover_status = await anyio.to_thread.run_sync(base_controller.get_status)
+            battery_percent = _voltage_to_percentage(rover_status.get("voltage"))
+        except Exception as exc:
+            LOGGER.debug("Failed to get battery for health check: %s", exc)
+    
     return HealthResponse(
         ok=True,
         name=ROBOT_NAME,
@@ -1207,6 +1357,7 @@ async def get_health() -> HealthResponse:
         claimed=STATE["claimed"],
         mode=Mode.ACCESS_POINT,
         version=APP_VERSION,
+        battery=battery_percent,
     )
 
 
@@ -1228,23 +1379,7 @@ async def get_camera_snapshot() -> Response:
 
 @app.get("/camera/stream", tags=["Camera"])
 async def get_camera_stream(frames: int | None = Query(default=None, ge=1)) -> StreamingResponse:
-    try:
-        response = oak_video_response()
-    except HTTPException as exc:
-        if exc.status_code != 503:
-            raise
-        LOGGER.info(
-            "DepthAI MJPEG stream unavailable; falling back to camera service",
-            extra={"reason": exc.detail},
-        )
-    else:
-        if frames is not None:
-            LOGGER.info(
-                "Ignoring frame limit request; DepthAI MJPEG stream is continuous",
-                extra={"frames": frames},
-            )
-        return response
-
+    # Always use camera service (USB webcam) to keep OAK-D free for /shot endpoint
     async def stream_generator() -> AsyncIterator[bytes]:
         LOGGER.info("Starting camera stream", extra={"frames": frames})
         frame_count = 0
@@ -1282,9 +1417,11 @@ def _voltage_to_percentage(voltage: float | None) -> int:
     if voltage is None:
         return 0
 
-    # Heuristic mapping for a 3S LiPo pack commonly used on the rover.
+    # Voltage range for the rover's 3S LiPo pack with conservative charging
+    # Full charge: 12.25V (4.08V per cell) - safer for battery longevity
+    # Empty: 9.0V (3.0V per cell) - safe discharge limit
     empty_voltage = 9.0
-    full_voltage = 12.6
+    full_voltage = 12.25
 
     percent = (voltage - empty_voltage) / (full_voltage - empty_voltage)
     percent = max(0.0, min(1.0, percent))
