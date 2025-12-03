@@ -12,8 +12,6 @@ from datetime import datetime
 from typing import Dict, Any, Optional, List, Callable
 from functools import lru_cache
 
-import config
-
 logger = logging.getLogger('Tools')
 
 # Try to import optional dependencies
@@ -30,14 +28,6 @@ try:
 except ImportError:
     PYTTSX3_OK = False
     logger.warning("pyttsx3 not available - local TTS disabled")
-
-try:
-    import spotipy
-    from spotipy.oauth2 import SpotifyOAuth
-    SPOTIPY_OK = True
-except ImportError:
-    SPOTIPY_OK = False
-    logger.warning("spotipy not available - Spotify integration disabled")
 
 
 class ToolExecutor:
@@ -410,31 +400,179 @@ class ToolExecutor:
             return {"success": False, "result": f"Calculation error: {str(e)}", "data": None}
     
     async def play_music(self, action: str = "play", query: str = "") -> Dict[str, Any]:
-        """Control music playback."""
+        """Control music playback or start playing from Spotify."""
         try:
-            if not self.spotify_enabled:
-                # Try basic system commands for music control
-                if action == "pause":
-                    # Try to pause media on different platforms
-                    result = await self._control_system_media("pause")
-                elif action == "play":
-                    result = await self._control_system_media("play")
-                elif action == "next":
-                    result = await self._control_system_media("next")
-                elif action == "previous":
-                    result = await self._control_system_media("previous")
-                else:
-                    return {"success": False, "result": "Music control not configured", "data": None}
-                
-                return result
+            # If Spotify is enabled, use full Spotify API
+            if self.spotify_enabled:
+                return await self._spotify_control(action, query)
+            
+            # Otherwise use system media control (playerctl/etc)
+            if action == "pause":
+                result = await self._control_system_media("pause")
+            elif action == "play":
+                result = await self._control_system_media("play")
+            elif action == "next":
+                result = await self._control_system_media("next")
+            elif action == "previous":
+                result = await self._control_system_media("previous")
             else:
-                # Spotify integration using Web API
-                result = await self._control_spotify(action, query)
-                return result
+                return {"success": False, "result": "Music control not configured", "data": None}
+            
+            return result
         
         except Exception as e:
             logger.error(f"Music control error: {e}")
             return {"success": False, "result": f"Music control error: {str(e)}", "data": None}
+    
+    async def _spotify_control(self, action: str, query: str = "") -> Dict[str, Any]:
+        """Control Spotify playback using Web API."""
+        if not await self._ensure_client():
+            return {"success": False, "result": "Cannot connect to Spotify", "data": None}
+        
+        try:
+            # Get Spotify credentials
+            client_id = os.getenv("SPOTIFY_CLIENT_ID")
+            client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
+            
+            if not client_id or not client_secret:
+                return {
+                    "success": False,
+                    "result": "Spotify credentials not configured",
+                    "data": None
+                }
+            
+            # Get access token
+            token = await self._get_spotify_token(client_id, client_secret)
+            if not token:
+                return {"success": False, "result": "Could not authenticate with Spotify", "data": None}
+            
+            headers = {"Authorization": f"Bearer {token}"}
+            
+            if action == "play":
+                # Start playback - play user's liked songs shuffled
+                # First, try to get available devices
+                devices_response = await self.http_client.get(
+                    "https://api.spotify.com/v1/me/player/devices",
+                    headers=headers
+                )
+                
+                if devices_response.status_code != 200:
+                    return {
+                        "success": False,
+                        "result": "No Spotify devices available. Open Spotify on your phone/computer first.",
+                        "data": None
+                    }
+                
+                devices = devices_response.json().get("devices", [])
+                if not devices:
+                    return {
+                        "success": False,
+                        "result": "No active Spotify devices. Open Spotify app first.",
+                        "data": None
+                    }
+                
+                # Get user's saved tracks (liked songs)
+                tracks_response = await self.http_client.get(
+                    "https://api.spotify.com/v1/me/tracks?limit=50",
+                    headers=headers
+                )
+                
+                if tracks_response.status_code == 200:
+                    tracks = tracks_response.json().get("items", [])
+                    if tracks:
+                        # Start playback with liked songs, shuffled
+                        play_response = await self.http_client.put(
+                            "https://api.spotify.com/v1/me/player/play",
+                            headers=headers,
+                            json={
+                                "context_uri": "spotify:collection:tracks",  # User's liked songs
+                                "offset": {"position": 0},
+                                "position_ms": 0
+                            }
+                        )
+                        
+                        # Enable shuffle
+                        await self.http_client.put(
+                            "https://api.spotify.com/v1/me/player/shuffle?state=true",
+                            headers=headers
+                        )
+                        
+                        return {
+                            "success": True,
+                            "result": "Playing your liked songs on Spotify",
+                            "data": {"action": "play", "source": "liked_songs"}
+                        }
+                
+                # Fallback: just resume playback
+                play_response = await self.http_client.put(
+                    "https://api.spotify.com/v1/me/player/play",
+                    headers=headers
+                )
+                
+                return {
+                    "success": True,
+                    "result": "Resuming Spotify playback",
+                    "data": {"action": "play"}
+                }
+            
+            elif action == "pause":
+                await self.http_client.put(
+                    "https://api.spotify.com/v1/me/player/pause",
+                    headers=headers
+                )
+                return {"success": True, "result": "Paused Spotify", "data": {"action": "pause"}}
+            
+            elif action == "next":
+                await self.http_client.post(
+                    "https://api.spotify.com/v1/me/player/next",
+                    headers=headers
+                )
+                return {"success": True, "result": "Skipped to next song", "data": {"action": "next"}}
+            
+            elif action == "previous":
+                await self.http_client.post(
+                    "https://api.spotify.com/v1/me/player/previous",
+                    headers=headers
+                )
+                return {"success": True, "result": "Previous song", "data": {"action": "previous"}}
+            
+            else:
+                return {"success": False, "result": f"Unknown action: {action}", "data": None}
+        
+        except Exception as e:
+            logger.error(f"Spotify control error: {e}")
+            return {"success": False, "result": f"Spotify error: {str(e)}", "data": None}
+    
+    async def _get_spotify_token(self, client_id: str, client_secret: str) -> Optional[str]:
+        """Get Spotify access token using client credentials flow."""
+        try:
+            import base64
+            
+            # Encode credentials
+            auth_str = f"{client_id}:{client_secret}"
+            auth_bytes = auth_str.encode('utf-8')
+            auth_b64 = base64.b64encode(auth_bytes).decode('utf-8')
+            
+            # Request token
+            response = await self.http_client.post(
+                "https://accounts.spotify.com/api/token",
+                headers={
+                    "Authorization": f"Basic {auth_b64}",
+                    "Content-Type": "application/x-www-form-urlencoded"
+                },
+                data="grant_type=client_credentials"
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                return data.get("access_token")
+            else:
+                logger.error(f"Spotify auth failed: {response.status_code} {response.text}")
+                return None
+        
+        except Exception as e:
+            logger.error(f"Spotify token error: {e}")
+            return None
     
     async def _control_system_media(self, action: str) -> Dict[str, Any]:
         """Control system media playback using platform-specific commands or robot."""
@@ -524,98 +662,6 @@ class ToolExecutor:
             return {
                 "success": False,
                 "result": f"Could not control robot music: {str(e)}",
-                "data": None
-            }
-    
-    async def _control_spotify(self, action: str, query: str = "") -> Dict[str, Any]:
-        """Control Spotify playback using Web API."""
-        if not SPOTIPY_OK:
-            return {"success": False, "result": "Spotify library not available", "data": None}
-        
-        try:
-            # Create Spotify client with user credentials
-            sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
-                client_id=config.SPOTIFY_CLIENT_ID,
-                client_secret=config.SPOTIFY_CLIENT_SECRET,
-                redirect_uri=config.SPOTIFY_REDIRECT_URI,
-                scope="user-read-playback-state,user-modify-playback-state,user-read-currently-playing",
-                cache_path="/tmp/.spotify_cache"
-            ))
-            
-            # Get available devices
-            devices = sp.devices()
-            
-            # Find ROVY/Raspotify device
-            rovy_device = None
-            for device in devices.get('devices', []):
-                if config.SPOTIFY_DEVICE_NAME.lower() in device['name'].lower():
-                    rovy_device = device
-                    break
-            
-            if not rovy_device:
-                return {
-                    "success": False,
-                    "result": f"Spotify device '{config.SPOTIFY_DEVICE_NAME}' not found. Open Spotify on your phone and select the device first.",
-                    "data": None
-                }
-            
-            device_id = rovy_device['id']
-            
-            # Perform action
-            if action == "play":
-                # If query provided, search and play
-                if query:
-                    results = sp.search(q=query, limit=1, type='track,playlist')
-                    if results.get('tracks', {}).get('items'):
-                        track_uri = results['tracks']['items'][0]['uri']
-                        sp.start_playback(device_id=device_id, uris=[track_uri])
-                        return {
-                            "success": True,
-                            "result": f"Playing {results['tracks']['items'][0]['name']} on ROVY",
-                            "data": {"query": query}
-                        }
-                else:
-                    # Resume or play user's liked songs / recent
-                    try:
-                        sp.start_playback(device_id=device_id)
-                        return {
-                            "success": True,
-                            "result": "Music playing on ROVY",
-                            "data": {"action": "play"}
-                        }
-                    except:
-                        # Start with a default playlist
-                        sp.start_playback(device_id=device_id, context_uri="spotify:playlist:37i9dQZEVXbMDoHDwVN2tF")  # Global Top 50
-                        return {
-                            "success": True,
-                            "result": "Playing Global Top 50 on ROVY",
-                            "data": {"action": "play"}
-                        }
-            
-            elif action == "pause":
-                sp.pause_playback(device_id=device_id)
-                return {"success": True, "result": "Music paused on ROVY", "data": {"action": "pause"}}
-            
-            elif action == "next":
-                sp.next_track(device_id=device_id)
-                return {"success": True, "result": "Skipped to next track on ROVY", "data": {"action": "next"}}
-            
-            elif action == "previous":
-                sp.previous_track(device_id=device_id)
-                return {"success": True, "result": "Skipped to previous track on ROVY", "data": {"action": "previous"}}
-            
-            elif action == "stop":
-                sp.pause_playback(device_id=device_id)
-                return {"success": True, "result": "Music stopped on ROVY", "data": {"action": "stop"}}
-            
-            else:
-                return {"success": False, "result": f"Unknown action: {action}", "data": None}
-        
-        except Exception as e:
-            logger.error(f"Spotify control error: {e}")
-            return {
-                "success": False,
-                "result": f"Spotify error: {str(e)}",
                 "data": None
             }
     
