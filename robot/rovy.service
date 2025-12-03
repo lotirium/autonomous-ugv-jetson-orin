@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=rovy
 Group=rovy
-SupplementaryGroups=video plugdev
+SupplementaryGroups=video plugdev audio
 WorkingDirectory=/home/rovy/rovy_client/robot
 ExecStart=/bin/bash /home/rovy/rovy_client/robot/start.sh
 Restart=on-failure
@@ -19,6 +19,8 @@ StandardError=journal
 Environment=PYTHONUNBUFFERED=1
 Environment=CAMERA_WEBCAM_DEVICE=/dev/video0
 Environment=ROVER_SERIAL_DEVICE=/dev/ttyAMA0
+Environment=AUDIODEV=hw:3,0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
 
 [Install]
 WantedBy=multi-user.target

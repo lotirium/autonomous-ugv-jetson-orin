@@ -725,99 +725,65 @@ async def speak_text(request: dict):
     if not text:
         raise HTTPException(status_code=400, detail="No text provided")
     
-    print(f"[Speak] {text[:50]}...")
+    print(f"[Speak] {text[:80]}...")
     
-    # If cloud provided pre-generated audio, play it
-    if audio_base64 and PLAYBACK_OK:
+    # Run TTS in background thread so it doesn't block API response
+    def do_speak():
         try:
-            import io
-            audio_bytes = base64.b64decode(audio_base64)
-            audio_io = io.BytesIO(audio_bytes)
-            data, samplerate = sf.read(audio_io)
+            import tempfile
+            import os
             
-            # Apply volume
-            volume_multiplier = AUDIO_STATE["volume"] / 100.0
-            data = data * volume_multiplier
+            piper_voice = config.PIPER_VOICE
             
-            # Find output device
-            devices = sd.query_devices()
-            output_device = None
-            for i, dev in enumerate(devices):
-                if dev['max_output_channels'] > 0:
-                    output_device = i
-                    break
-            sd.play(data, samplerate, device=output_device)
-            sd.wait()
-            return {"status": "spoken", "method": "audio"}
+            # Create temp wav file
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                wav_path = f.name
+            
+            # Generate speech with Piper
+            print(f"[Speak] Generating with Piper...")
+            proc = subprocess.run(
+                ['piper', '--model', piper_voice, '--output_file', wav_path],
+                input=text,
+                text=True,
+                capture_output=True,
+                timeout=30
+            )
+            
+            if proc.returncode == 0 and os.path.exists(wav_path):
+                file_size = os.path.getsize(wav_path)
+                print(f"[Speak] Generated {file_size} bytes, playing...")
+                
+                # Use ffplay - more reliable for full playback
+                # -nodisp: no video window, -autoexit: exit when done, -loglevel quiet
+                play_proc = subprocess.run(
+                    ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', wav_path],
+                    capture_output=True,
+                    timeout=30
+                )
+                
+                if play_proc.returncode == 0:
+                    print(f"[Speak] Played successfully with ffplay")
+                else:
+                    # Fallback to pw-play
+                    print(f"[Speak] Trying pw-play...")
+                    subprocess.run(['pw-play', wav_path], capture_output=True, timeout=30)
+                    print(f"[Speak] Played with pw-play fallback")
+                
+                os.unlink(wav_path)
+            else:
+                error = proc.stderr.decode()[:200] if proc.stderr else "Unknown error"
+                print(f"[Speak] Piper failed: {error}")
+                
         except Exception as e:
-            print(f"[Speak] Audio playback failed: {e}, trying Piper...")
+            print(f"[Speak] TTS error: {e}")
+            import traceback
+            traceback.print_exc()
     
-    # Use Piper TTS locally on Pi
-    try:
-        import tempfile
-        import os
-        
-        piper_voice = config.PIPER_VOICE
-        
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-            wav_path = f.name
-        
-        # Generate speech with Piper
-        proc = subprocess.run(
-            ['piper', '--model', piper_voice, '--output_file', wav_path],
-            input=text,
-            text=True,
-            capture_output=True,
-            timeout=30
-        )
-        
-        if proc.returncode == 0 and PLAYBACK_OK and os.path.exists(wav_path):
-            # Play the generated audio
-            data, samplerate = sf.read(wav_path)
-            
-            # Apply volume
-            volume_multiplier = AUDIO_STATE["volume"] / 100.0
-            data = data * volume_multiplier
-            
-            # Find output device and its default sample rate
-            devices = sd.query_devices()
-            output_device = None
-            device_samplerate = 48000  # Default fallback
-            for i, dev in enumerate(devices):
-                if dev['max_output_channels'] > 0:
-                    output_device = i
-                    device_samplerate = int(dev['default_samplerate'])
-                    break
-            
-            # Resample if needed
-            if samplerate != device_samplerate:
-                from scipy import signal as scipy_signal
-                num_samples = int(len(data) * device_samplerate / samplerate)
-                data = scipy_signal.resample(data, num_samples)
-                samplerate = device_samplerate
-            
-            sd.play(data, samplerate, device=output_device)
-            sd.wait()
-            os.unlink(wav_path)
-            return {"status": "spoken", "method": "piper"}
-        else:
-            # Fallback to espeak
-            print(f"[Speak] Piper failed, trying espeak...")
-            subprocess.run(['espeak', text], timeout=30)
-            return {"status": "spoken", "method": "espeak"}
-            
-    except FileNotFoundError:
-        # Piper not installed, use espeak
-        print("[Speak] Piper not found, using espeak")
-        try:
-            subprocess.run(['espeak', text], timeout=30)
-            return {"status": "spoken", "method": "espeak"}
-        except:
-            print(f"[Speak] No TTS available")
-            return {"status": "failed", "error": "No TTS available"}
-    except Exception as e:
-        print(f"[Speak] TTS error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    # Start speaking in background
+    threading.Thread(target=do_speak, daemon=True).start()
+    
+    # Return immediately
+    return {"status": "speaking", "method": "piper_async"}
 
 
 @app.post("/claim/request")
@@ -860,6 +826,25 @@ async def claim_control() -> ClaimControlResponse:
 @app.get("/control/volume")
 async def get_volume():
     """Get current speaker volume."""
+    # Try to read hardware volume
+    try:
+        result = subprocess.run(
+            ['amixer', '-c', '3', 'get', 'PCM'],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        # Parse output to get hardware volume (0-147)
+        import re
+        match = re.search(r'Playback (\d+) \[(\d+)%\]', result.stdout)
+        if match:
+            hw_value = int(match.group(1))
+            # Map 0-147 to 0-100
+            volume = int((hw_value / 147.0) * 100)
+            AUDIO_STATE["volume"] = volume
+    except Exception as e:
+        print(f"[Volume] Could not read hardware volume: {e}")
+    
     return {
         "volume": AUDIO_STATE["volume"],
         "min": 0,
@@ -874,7 +859,22 @@ async def set_volume(command: VolumeCommand):
     volume = max(0, min(100, command.volume))
     AUDIO_STATE["volume"] = volume
     
-    print(f"[Volume] Set to {volume}%")
+    # Try to set hardware mixer volume with amixer
+    # Note: For systemd services, hardware volume control may not work
+    # The software multiplier in TTS is still applied
+    try:
+        # USB Audio card is card 3, PCM control ranges 0-147
+        # Map 0-100% to 0-147
+        hw_volume = int((volume / 100.0) * 147)
+        subprocess.run(
+            ['amixer', '-c', '3', 'sset', 'PCM', str(hw_volume)],
+            capture_output=True,
+            timeout=2
+        )
+        print(f"[Volume] Set to {volume}% (hardware: {hw_volume}/147)")
+    except Exception as e:
+        print(f"[Volume] Set software volume to {volume}% (hardware control unavailable)")
+    
     return {
         "volume": volume,
         "status": "ok"
