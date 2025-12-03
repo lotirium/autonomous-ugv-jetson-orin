@@ -12,6 +12,8 @@ from datetime import datetime
 from typing import Dict, Any, Optional, List, Callable
 from functools import lru_cache
 
+import config
+
 logger = logging.getLogger('Tools')
 
 # Try to import optional dependencies
@@ -28,6 +30,14 @@ try:
 except ImportError:
     PYTTSX3_OK = False
     logger.warning("pyttsx3 not available - local TTS disabled")
+
+try:
+    import spotipy
+    from spotipy.oauth2 import SpotifyOAuth
+    SPOTIPY_OK = True
+except ImportError:
+    SPOTIPY_OK = False
+    logger.warning("spotipy not available - Spotify integration disabled")
 
 
 class ToolExecutor:
@@ -418,12 +428,9 @@ class ToolExecutor:
                 
                 return result
             else:
-                # Spotify integration (requires spotify credentials)
-                return {
-                    "success": False,
-                    "result": "Spotify integration not yet implemented",
-                    "data": None
-                }
+                # Spotify integration using Web API
+                result = await self._control_spotify(action, query)
+                return result
         
         except Exception as e:
             logger.error(f"Music control error: {e}")
@@ -517,6 +524,98 @@ class ToolExecutor:
             return {
                 "success": False,
                 "result": f"Could not control robot music: {str(e)}",
+                "data": None
+            }
+    
+    async def _control_spotify(self, action: str, query: str = "") -> Dict[str, Any]:
+        """Control Spotify playback using Web API."""
+        if not SPOTIPY_OK:
+            return {"success": False, "result": "Spotify library not available", "data": None}
+        
+        try:
+            # Create Spotify client with user credentials
+            sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
+                client_id=config.SPOTIFY_CLIENT_ID,
+                client_secret=config.SPOTIFY_CLIENT_SECRET,
+                redirect_uri=config.SPOTIFY_REDIRECT_URI,
+                scope="user-read-playback-state,user-modify-playback-state,user-read-currently-playing",
+                cache_path="/tmp/.spotify_cache"
+            ))
+            
+            # Get available devices
+            devices = sp.devices()
+            
+            # Find ROVY/Raspotify device
+            rovy_device = None
+            for device in devices.get('devices', []):
+                if config.SPOTIFY_DEVICE_NAME.lower() in device['name'].lower():
+                    rovy_device = device
+                    break
+            
+            if not rovy_device:
+                return {
+                    "success": False,
+                    "result": f"Spotify device '{config.SPOTIFY_DEVICE_NAME}' not found. Open Spotify on your phone and select the device first.",
+                    "data": None
+                }
+            
+            device_id = rovy_device['id']
+            
+            # Perform action
+            if action == "play":
+                # If query provided, search and play
+                if query:
+                    results = sp.search(q=query, limit=1, type='track,playlist')
+                    if results.get('tracks', {}).get('items'):
+                        track_uri = results['tracks']['items'][0]['uri']
+                        sp.start_playback(device_id=device_id, uris=[track_uri])
+                        return {
+                            "success": True,
+                            "result": f"Playing {results['tracks']['items'][0]['name']} on ROVY",
+                            "data": {"query": query}
+                        }
+                else:
+                    # Resume or play user's liked songs / recent
+                    try:
+                        sp.start_playback(device_id=device_id)
+                        return {
+                            "success": True,
+                            "result": "Music playing on ROVY",
+                            "data": {"action": "play"}
+                        }
+                    except:
+                        # Start with a default playlist
+                        sp.start_playback(device_id=device_id, context_uri="spotify:playlist:37i9dQZEVXbMDoHDwVN2tF")  # Global Top 50
+                        return {
+                            "success": True,
+                            "result": "Playing Global Top 50 on ROVY",
+                            "data": {"action": "play"}
+                        }
+            
+            elif action == "pause":
+                sp.pause_playback(device_id=device_id)
+                return {"success": True, "result": "Music paused on ROVY", "data": {"action": "pause"}}
+            
+            elif action == "next":
+                sp.next_track(device_id=device_id)
+                return {"success": True, "result": "Skipped to next track on ROVY", "data": {"action": "next"}}
+            
+            elif action == "previous":
+                sp.previous_track(device_id=device_id)
+                return {"success": True, "result": "Skipped to previous track on ROVY", "data": {"action": "previous"}}
+            
+            elif action == "stop":
+                sp.pause_playback(device_id=device_id)
+                return {"success": True, "result": "Music stopped on ROVY", "data": {"action": "stop"}}
+            
+            else:
+                return {"success": False, "result": f"Unknown action: {action}", "data": None}
+        
+        except Exception as e:
+            logger.error(f"Spotify control error: {e}")
+            return {
+                "success": False,
+                "result": f"Spotify error: {str(e)}",
                 "data": None
             }
     

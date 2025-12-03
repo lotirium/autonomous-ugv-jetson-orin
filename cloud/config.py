@@ -83,6 +83,16 @@ RECONNECT_DELAY = 5
 MAX_RECONNECT_ATTEMPTS = 0  # 0 = infinite
 
 # =============================================================================
+# Spotify Configuration
+# =============================================================================
+
+SPOTIFY_ENABLED = os.getenv("SPOTIFY_ENABLED", "true").lower() == "true"
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "93138e86ecf24daea4b07df74c7cb8e9")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "f8f131ad542a4cf2a021aae8bdbc5763")
+SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", "http://localhost:8888/callback")
+SPOTIFY_DEVICE_NAME = os.getenv("SPOTIFY_DEVICE_NAME", "ROVY")  # Raspotify device name
+
+# =============================================================================
 # Logging
 # =============================================================================
 
