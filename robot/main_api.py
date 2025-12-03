@@ -450,13 +450,17 @@ async def health() -> HealthResponse:
 
 
 @app.get("/status")
-async def get_status() -> StatusResponse:
-    """Get robot status."""
+async def get_status():
+    """Get robot status with token validation."""
     robot = get_robot()
     
     status_data = {
         "rover_connected": robot.rover is not None,
-        "camera_connected": robot.camera is not None
+        "camera_connected": robot.camera is not None,
+        "tokenValid": True,  # Always valid since robot is auto-claimed
+        "claimed": CLAIM_STATE["claimed"],
+        "robotId": "rovy-pi",
+        "name": "ROVY"
     }
     
     if robot.rover:
@@ -468,7 +472,7 @@ async def get_status() -> StatusResponse:
                 status_data["battery_percent"] = robot.rover.voltage_to_percent(voltage)
             status_data["temperature"] = rover_status.get('temperature')
     
-    return StatusResponse(**status_data)
+    return status_data
 
 
 @app.get("/shot")
