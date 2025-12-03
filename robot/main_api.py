@@ -120,6 +120,9 @@ class ClaimConfirmResponse(BaseModel):
 class ClaimControlResponse(BaseModel):
     session_id: str
 
+class VolumeCommand(BaseModel):
+    volume: int  # 0-100
+
 
 # ==============================================================================
 # Robot Client with API
@@ -408,6 +411,11 @@ CLAIM_STATE = {
     "control_token_hash": hashlib.sha256(DEFAULT_TOKEN.encode()).hexdigest(),
     "pin": None,
     "pin_exp": 0,
+}
+
+# Audio state
+AUDIO_STATE = {
+    "volume": 80,  # 0-100, default 80%
 }
 
 def hash_token(token: str) -> str:
@@ -726,6 +734,11 @@ async def speak_text(request: dict):
             audio_bytes = base64.b64decode(audio_base64)
             audio_io = io.BytesIO(audio_bytes)
             data, samplerate = sf.read(audio_io)
+            
+            # Apply volume
+            volume_multiplier = AUDIO_STATE["volume"] / 100.0
+            data = data * volume_multiplier
+            
             # Find output device
             devices = sd.query_devices()
             output_device = None
@@ -761,6 +774,10 @@ async def speak_text(request: dict):
         if proc.returncode == 0 and PLAYBACK_OK and os.path.exists(wav_path):
             # Play the generated audio
             data, samplerate = sf.read(wav_path)
+            
+            # Apply volume
+            volume_multiplier = AUDIO_STATE["volume"] / 100.0
+            data = data * volume_multiplier
             
             # Find output device and its default sample rate
             devices = sd.query_devices()
@@ -838,6 +855,30 @@ async def claim_control() -> ClaimControlResponse:
     
     print(f"[Claim] Auto-approved control session: {session_id}")
     return ClaimControlResponse(session_id=session_id)
+
+
+@app.get("/control/volume")
+async def get_volume():
+    """Get current speaker volume."""
+    return {
+        "volume": AUDIO_STATE["volume"],
+        "min": 0,
+        "max": 100
+    }
+
+
+@app.post("/control/volume")
+async def set_volume(command: VolumeCommand):
+    """Set speaker volume (0-100)."""
+    # Clamp volume to valid range
+    volume = max(0, min(100, command.volume))
+    AUDIO_STATE["volume"] = volume
+    
+    print(f"[Volume] Set to {volume}%")
+    return {
+        "volume": volume,
+        "status": "ok"
+    }
 
 
 # ==============================================================================
