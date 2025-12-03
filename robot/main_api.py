@@ -812,46 +812,81 @@ async def speak_text(request: dict):
     return {"status": "speaking", "method": "piper_async"}
 
 
+# Global music player process
+music_player_process = None
+
 @app.post("/music/{action}")
 async def control_music(action: str, request: dict = None):
-    """Control music playback on robot speakers (from cloud AI)."""
+    """Control music playback on robot speakers using YouTube/yt-dlp."""
+    global music_player_process
+    
     print(f"[Music] Action: {action}")
     
     valid_actions = ["play", "pause", "stop", "next", "previous"]
     if action not in valid_actions:
         raise HTTPException(status_code=400, detail=f"Invalid action. Use: {', '.join(valid_actions)}")
     
+    # Get search query if provided
+    query = request.get("query", "") if request else ""
+    
     # Run music control in background
     def do_music_control():
+        global music_player_process
+        
         try:
-            # On Linux (Raspberry Pi), use playerctl
-            import platform
-            if platform.system() == "Linux":
-                # Check if playerctl is available
-                which_proc = subprocess.run(
-                    ['which', 'playerctl'],
+            if action == "play":
+                # Stop any existing playback first
+                if music_player_process and music_player_process.poll() is None:
+                    music_player_process.terminate()
+                    music_player_process.wait(timeout=2)
+                
+                # Determine search query
+                if query:
+                    search_term = query
+                else:
+                    # Default: popular music mix
+                    search_term = "popular music mix 2024"
+                
+                print(f"[Music] Searching YouTube for: {search_term}")
+                
+                # Use yt-dlp to search and get audio stream URL
+                # --get-url returns the direct media URL without downloading
+                result = subprocess.run(
+                    ['yt-dlp', '--default-search', 'ytsearch1:', 
+                     '-f', 'bestaudio', '--get-url', '--no-warnings', 
+                     '--quiet', search_term],
                     capture_output=True,
-                    timeout=2
+                    text=True,
+                    timeout=15
                 )
                 
-                if which_proc.returncode == 0:
-                    # playerctl is installed
-                    print(f"[Music] Executing playerctl {action}")
-                    result = subprocess.run(
-                        ['playerctl', action],
-                        capture_output=True,
-                        text=True,
-                        timeout=5
+                if result.returncode == 0 and result.stdout.strip():
+                    audio_url = result.stdout.strip()
+                    print(f"[Music] Found audio, starting playback...")
+                    
+                    # Play the audio URL with ffplay
+                    music_player_process = subprocess.Popen(
+                        ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', audio_url],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
                     )
                     
-                    if result.returncode == 0:
-                        print(f"[Music] ✅ {action} successful")
-                    else:
-                        print(f"[Music] ⚠️ playerctl {action} returned: {result.stderr}")
+                    print(f"[Music] ✅ Playing: {search_term}")
                 else:
-                    print(f"[Music] ❌ playerctl not installed (install: sudo apt install playerctl)")
-            else:
-                print(f"[Music] ❌ Music control not supported on {platform.system()}")
+                    print(f"[Music] ❌ Could not find audio for: {search_term}")
+            
+            elif action == "stop":
+                if music_player_process and music_player_process.poll() is None:
+                    music_player_process.terminate()
+                    music_player_process.wait(timeout=2)
+                    print(f"[Music] ✅ Stopped")
+                else:
+                    print(f"[Music] No music playing")
+            
+            elif action in ["pause", "next", "previous"]:
+                # These require more complex player control
+                # For now, just stop and inform user
+                print(f"[Music] {action} not supported yet, use 'stop' to end playback")
                 
         except Exception as e:
             print(f"[Music] Error: {e}")
@@ -864,7 +899,7 @@ async def control_music(action: str, request: dict = None):
     return {
         "status": "ok",
         "action": action,
-        "message": f"Music {action} command sent to robot"
+        "message": f"Music {action} command sent"
     }
 
 
