@@ -622,6 +622,12 @@ async def get_wifi_status():
         return {"connected": False, "error": str(e)}
 
 
+@app.get("/mode")
+async def get_mode():
+    """Get robot operating mode."""
+    return {"mode": "autonomous"}
+
+
 # ==============================================================================
 # Main Server Startup
 # ==============================================================================
