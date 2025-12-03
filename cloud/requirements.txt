@@ -36,3 +36,6 @@ optimum>=1.16.0     # Hugging Face optimization tools
 # Audio processing
 openai-whisper>=20230314
 piper-tts>=1.2.0
+
+# Spotify integration
+spotipy>=2.25.0
