@@ -706,6 +706,78 @@ async def get_mode():
     return {"mode": "autonomous"}
 
 
+@app.post("/speak")
+async def speak_text(request: dict):
+    """Speak text using robot's TTS (from cloud AI response)."""
+    robot = get_robot()
+    
+    text = request.get("text", "")
+    audio_base64 = request.get("audio", None)
+    
+    if not text:
+        raise HTTPException(status_code=400, detail="No text provided")
+    
+    print(f"[Speak] {text[:50]}...")
+    
+    # If cloud provided pre-generated audio, play it
+    if audio_base64 and PLAYBACK_OK:
+        try:
+            import io
+            audio_bytes = base64.b64decode(audio_base64)
+            audio_io = io.BytesIO(audio_bytes)
+            data, samplerate = sf.read(audio_io)
+            sd.play(data, samplerate)
+            sd.wait()
+            return {"status": "spoken", "method": "audio"}
+        except Exception as e:
+            print(f"[Speak] Audio playback failed: {e}, trying Piper...")
+    
+    # Use Piper TTS locally on Pi
+    try:
+        import tempfile
+        import os
+        
+        piper_voice = config.PIPER_VOICE
+        
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+            wav_path = f.name
+        
+        # Generate speech with Piper
+        proc = subprocess.run(
+            ['piper', '--model', piper_voice, '--output_file', wav_path],
+            input=text,
+            text=True,
+            capture_output=True,
+            timeout=30
+        )
+        
+        if proc.returncode == 0 and PLAYBACK_OK and os.path.exists(wav_path):
+            # Play the generated audio
+            data, samplerate = sf.read(wav_path)
+            sd.play(data, samplerate)
+            sd.wait()
+            os.unlink(wav_path)
+            return {"status": "spoken", "method": "piper"}
+        else:
+            # Fallback to espeak
+            print(f"[Speak] Piper failed, trying espeak...")
+            subprocess.run(['espeak', text], timeout=30)
+            return {"status": "spoken", "method": "espeak"}
+            
+    except FileNotFoundError:
+        # Piper not installed, use espeak
+        print("[Speak] Piper not found, using espeak")
+        try:
+            subprocess.run(['espeak', text], timeout=30)
+            return {"status": "spoken", "method": "espeak"}
+        except:
+            print(f"[Speak] No TTS available")
+            return {"status": "failed", "error": "No TTS available"}
+    except Exception as e:
+        print(f"[Speak] TTS error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/claim/request")
 async def claim_request() -> ClaimRequestResponse:
     """Generate a PIN code for claiming the robot (optional, auto-claimed)."""
