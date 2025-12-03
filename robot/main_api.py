@@ -221,6 +221,19 @@ class RobotServer:
             print(f"[Audio] Init failed: {e}")
             return False
     
+    def init_volume(self):
+        """Initialize hardware volume to safe level (85%)."""
+        try:
+            # Set hardware volume to 125 (85% of 147) for optimal quality
+            subprocess.run(
+                ['amixer', '-c', str(HW_CARD), 'sset', 'PCM', str(HW_VOLUME_MAX)],
+                capture_output=True,
+                timeout=2
+            )
+            print(f"[Volume] Hardware initialized to 85% (125/147)")
+        except Exception as e:
+            print(f"[Volume] Hardware init failed: {e}")
+    
     def capture_image(self) -> Optional[bytes]:
         """Capture image from camera as JPEG bytes."""
         if not self.camera or not CAMERA_OK:
@@ -415,8 +428,14 @@ CLAIM_STATE = {
 
 # Audio state
 AUDIO_STATE = {
-    "volume": 80,  # 0-100, default 80%
+    "volume": 100,  # 0-100, default 100%
 }
+
+# Hardware volume mapping
+# Map app volume 0-100% to hardware 0-125 (85% of max 147)
+# This prevents overdrive/clipping at max volume
+HW_VOLUME_MAX = 125  # 85% of 147
+HW_CARD = 3  # USB Audio card
 
 def hash_token(token: str) -> str:
     """Hash a token for secure storage."""
@@ -826,10 +845,10 @@ async def claim_control() -> ClaimControlResponse:
 @app.get("/control/volume")
 async def get_volume():
     """Get current speaker volume."""
-    # Try to read hardware volume
+    # Try to read hardware volume and map back to 0-100 scale
     try:
         result = subprocess.run(
-            ['amixer', '-c', '3', 'get', 'PCM'],
+            ['amixer', '-c', str(HW_CARD), 'get', 'PCM'],
             capture_output=True,
             text=True,
             timeout=2
@@ -839,8 +858,9 @@ async def get_volume():
         match = re.search(r'Playback (\d+) \[(\d+)%\]', result.stdout)
         if match:
             hw_value = int(match.group(1))
-            # Map 0-147 to 0-100
-            volume = int((hw_value / 147.0) * 100)
+            # Map 0-125 to 0-100 (since 125 is our max)
+            volume = int((hw_value / HW_VOLUME_MAX) * 100)
+            volume = max(0, min(100, volume))  # Clamp to 0-100
             AUDIO_STATE["volume"] = volume
     except Exception as e:
         print(f"[Volume] Could not read hardware volume: {e}")
@@ -859,19 +879,17 @@ async def set_volume(command: VolumeCommand):
     volume = max(0, min(100, command.volume))
     AUDIO_STATE["volume"] = volume
     
-    # Try to set hardware mixer volume with amixer
-    # Note: For systemd services, hardware volume control may not work
-    # The software multiplier in TTS is still applied
+    # Set hardware mixer volume with safe mapping
+    # Map 0-100% to 0-125 (prevents overdrive at max volume)
     try:
-        # USB Audio card is card 3, PCM control ranges 0-147
-        # Map 0-100% to 0-147
-        hw_volume = int((volume / 100.0) * 147)
+        hw_volume = int((volume / 100.0) * HW_VOLUME_MAX)
         subprocess.run(
-            ['amixer', '-c', '3', 'sset', 'PCM', str(hw_volume)],
+            ['amixer', '-c', str(HW_CARD), 'sset', 'PCM', str(hw_volume)],
             capture_output=True,
             timeout=2
         )
-        print(f"[Volume] Set to {volume}% (hardware: {hw_volume}/147)")
+        hw_percent = int((hw_volume / 147.0) * 100)
+        print(f"[Volume] Set to {volume}% (hardware: {hw_volume}/147 = {hw_percent}%)")
     except Exception as e:
         print(f"[Volume] Set software volume to {volume}% (hardware control unavailable)")
     
@@ -896,6 +914,7 @@ async def run_robot_server():
     robot_server.init_rover()
     robot_server.init_camera()
     robot_server.init_audio()
+    robot_server.init_volume()
     
     # Try to connect to cloud (non-blocking)
     if WEBSOCKETS_OK:
