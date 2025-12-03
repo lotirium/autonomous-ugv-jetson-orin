@@ -54,13 +54,13 @@ IP=$(hostname -I | awk '{print $1}')
 echo "✓ IP Address: $IP"
 echo ""
 
-# Step 2: Start robot client
-echo "[2/2] Starting robot client..."
+# Step 2: Start robot server with API
+echo "[2/2] Starting robot server with API..."
 echo ""
-# Stay in robot directory and run robot client using venv's python
+# Stay in robot directory and run robot server using venv's python
 if [ -f "$VENV_PATH/bin/python" ]; then
-    "$VENV_PATH/bin/python" main.py
+    "$VENV_PATH/bin/python" main_api.py
 else
     # Fallback to system python if venv not found
-    python3 main.py
+    python3 main_api.py
 fi
