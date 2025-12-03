@@ -647,7 +647,7 @@ async def nod(command: NodCommand):
 
 @app.get("/wifi/status")
 async def get_wifi_status():
-    """Get WiFi connection status."""
+    """Get WiFi connection status with IP address."""
     try:
         # Check if WiFi is connected
         result = subprocess.run(
@@ -676,12 +676,29 @@ async def get_wifi_status():
             except Exception as e:
                 print(f"[WiFi] Could not get SSID: {e}")
         
+        # Get IP address
+        ip = None
+        try:
+            ip_result = subprocess.run(
+                ["hostname", "-I"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            # Get first IP address
+            ips = ip_result.stdout.strip().split()
+            if ips:
+                ip = ips[0]
+        except Exception as e:
+            print(f"[WiFi] Could not get IP: {e}")
+        
         return {
             "connected": is_connected,
-            "ssid": ssid
+            "ssid": ssid,
+            "ip": ip
         }
     except Exception as e:
-        return {"connected": False, "error": str(e), "ssid": "unknown"}
+        return {"connected": False, "error": str(e), "ssid": "unknown", "ip": None}
 
 
 @app.get("/mode")
