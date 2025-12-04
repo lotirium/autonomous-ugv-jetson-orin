@@ -84,7 +84,7 @@ class CloudAssistant:
         # Initialize tool executor if enabled
         self.tool_executor = None
         if enable_tools and TOOLS_OK:
-            self.tool_executor = get_tool_executor()
+            self.tool_executor = get_tool_executor(assistant=self)
             logger.info("Tool calling enabled")
         
         if not QWEN_VL_OK:

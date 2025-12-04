@@ -33,10 +33,11 @@ except ImportError:
 class ToolExecutor:
     """Executes external API calls and tools for the assistant."""
     
-    def __init__(self):
+    def __init__(self, assistant=None):
         self.spotify_enabled = os.getenv("SPOTIFY_ENABLED", "false").lower() == "true"
         self.youtube_music_enabled = os.getenv("YOUTUBE_MUSIC_ENABLED", "false").lower() == "true"
         self.http_client = None
+        self.assistant = assistant  # Store assistant reference for translation
         
         # Tool definitions for LLM to understand what's available
         self.tools = {
@@ -920,9 +921,6 @@ class ToolExecutor:
             Dict with success, translated result, and data
         """
         try:
-            # Import AI module here to avoid circular imports
-            from ai import CloudAssistant
-            
             # Language name normalization
             language_map = {
                 'chinese': 'Chinese (中文)',
@@ -950,11 +948,19 @@ class ToolExecutor:
             # Use the LLM to translate
             logger.info(f"Translating '{text}' to {display_language}")
             
-            # Create a temporary assistant instance if not available
-            assistant = CloudAssistant()
+            # Use the assistant reference if available, otherwise create one
+            if self.assistant:
+                assistant = self.assistant
+            else:
+                # Import AI module here to avoid circular imports
+                from ai import CloudAssistant
+                assistant = CloudAssistant()
             
-            # Get translation
-            translation = assistant.ask(prompt, max_tokens=150, temperature=0.1)
+            # Get translation using asyncio.to_thread to avoid event loop conflicts
+            import asyncio
+            translation = await asyncio.to_thread(
+                assistant.ask, prompt, 150, 0.1
+            )
             
             # Clean up the response (remove any extra explanations)
             translation = translation.strip()
@@ -1069,10 +1075,13 @@ class ToolExecutor:
 # Global instance
 _tool_executor = None
 
-def get_tool_executor() -> ToolExecutor:
+def get_tool_executor(assistant=None) -> ToolExecutor:
     """Get or create global ToolExecutor instance."""
     global _tool_executor
     if _tool_executor is None:
-        _tool_executor = ToolExecutor()
+        _tool_executor = ToolExecutor(assistant=assistant)
+    elif assistant and not _tool_executor.assistant:
+        # Update assistant reference if provided and not already set
+        _tool_executor.assistant = assistant
     return _tool_executor
 
