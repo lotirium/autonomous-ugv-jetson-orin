@@ -90,6 +90,14 @@ class ToolExecutor:
                     "speed": "slow/medium/fast (default medium)"
                 },
                 "keywords": ["move", "go", "forward", "backward", "left", "right", "turn", "drive"]
+            },
+            "translate": {
+                "description": "Translate text from one language to another",
+                "parameters": {
+                    "text": "Text to translate",
+                    "target_language": "Target language (e.g., Chinese, Spanish, French, etc.)"
+                },
+                "keywords": ["translate", "translation", "traduire", "traducir", "übersetzen", "tradurre", "翻訳", "翻译"]
             }
         }
     
@@ -113,6 +121,32 @@ class ToolExecutor:
         Returns: {"tool": "tool_name", "params": {...}} or None
         """
         query_lower = query.lower()
+        
+        # Translation - check first as it's very specific
+        translate_keywords = ['translate', 'traduire', 'traducir', 'übersetzen', 'tradurre', 'traduzir', '翻訳', '翻译']
+        if any(kw in query_lower for kw in translate_keywords):
+            # Pattern: "translate to [language] [text]" or "translate [text] to [language]"
+            patterns = [
+                r'translate\s+to\s+(\w+)\s+(.+)',  # "translate to Chinese I love you"
+                r'translate\s+(.+?)\s+to\s+(\w+)',  # "translate I love you to Chinese"
+                r'traduire\s+en\s+(\w+)\s+(.+)',  # French: "traduire en chinois je t'aime"
+                r'traducir\s+a(?:l)?\s+(\w+)\s+(.+)',  # Spanish: "traducir al chino te amo"
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, query_lower, re.IGNORECASE)
+                if match:
+                    if 'to' in pattern or 'en' in pattern or 'a' in pattern:
+                        # First group is language, second is text (for "to" patterns)
+                        if pattern.startswith(r'translate\s+to') or 'en' in pattern or 'a' in pattern:
+                            target_lang = match.group(1).strip()
+                            text = match.group(2).strip()
+                        else:
+                            # Text first, language second (for "translate X to Y")
+                            text = match.group(1).strip()
+                            target_lang = match.group(2).strip()
+                        
+                        return {"tool": "translate", "params": {"text": text, "target_language": target_lang}}
         
         # Time/Date - check first to avoid conflicts with "what is"
         time_patterns = [
@@ -286,6 +320,8 @@ class ToolExecutor:
                 return await self.set_reminder(params.get("message", ""), params.get("minutes", 5))
             elif tool_name == "web_search":
                 return await self.web_search(params.get("query", ""))
+            elif tool_name == "translate":
+                return await self.translate(params.get("text", ""), params.get("target_language", "English"))
             else:
                 return {"success": False, "result": f"Unknown tool: {tool_name}", "data": None}
         
@@ -866,6 +902,96 @@ class ToolExecutor:
         except Exception as e:
             logger.error(f"Web search error: {e}")
             return {"success": False, "result": f"Search error: {str(e)}", "data": None}
+    
+    async def translate(self, text: str, target_language: str) -> Dict[str, Any]:
+        """
+        Translate text to target language using the LLM.
+        
+        Args:
+            text: Text to translate
+            target_language: Target language (e.g., "Chinese", "Spanish", "French")
+        
+        Returns:
+            Dict with success, translated result, and data
+        """
+        try:
+            # Import AI module here to avoid circular imports
+            from ai import CloudAssistant
+            
+            # Language name normalization
+            language_map = {
+                'chinese': 'Chinese (中文)',
+                'mandarin': 'Chinese (中文)',
+                'spanish': 'Spanish (Español)',
+                'french': 'French (Français)',
+                'german': 'German (Deutsch)',
+                'italian': 'Italian (Italiano)',
+                'portuguese': 'Portuguese (Português)',
+                'russian': 'Russian (Русский)',
+                'japanese': 'Japanese (日本語)',
+                'korean': 'Korean (한국어)',
+                'arabic': 'Arabic (العربية)',
+                'hindi': 'Hindi (हिन्दी)',
+                'english': 'English',
+            }
+            
+            # Normalize target language
+            target_lower = target_language.lower()
+            display_language = language_map.get(target_lower, target_language.title())
+            
+            # Create translation prompt
+            prompt = f"Translate the following text to {display_language}. Return ONLY the translated text, nothing else:\n\n{text}"
+            
+            # Use the LLM to translate
+            logger.info(f"Translating '{text}' to {display_language}")
+            
+            # Create a temporary assistant instance if not available
+            assistant = CloudAssistant()
+            
+            # Get translation
+            translation = assistant.ask(prompt, max_tokens=150, temperature=0.1)
+            
+            # Clean up the response (remove any extra explanations)
+            translation = translation.strip()
+            
+            # Remove common prefixes the LLM might add
+            prefixes_to_remove = [
+                "Here is the translation:",
+                "Translation:",
+                "The translation is:",
+                "In " + display_language + ":",
+                display_language + ":",
+            ]
+            
+            for prefix in prefixes_to_remove:
+                if translation.lower().startswith(prefix.lower()):
+                    translation = translation[len(prefix):].strip()
+            
+            # Remove quotes if the LLM wrapped it
+            if translation.startswith('"') and translation.endswith('"'):
+                translation = translation[1:-1]
+            if translation.startswith("'") and translation.endswith("'"):
+                translation = translation[1:-1]
+            
+            logger.info(f"Translation result: {translation}")
+            
+            return {
+                "success": True,
+                "result": translation,
+                "data": {
+                    "original": text,
+                    "translation": translation,
+                    "target_language": display_language
+                }
+            }
+        
+        except Exception as e:
+            logger.error(f"Translation error: {e}", exc_info=True)
+            return {
+                "success": False,
+                "result": f"Translation failed: {str(e)}",
+                "data": None
+            }
     
     async def move_robot(self, direction: str = "forward", distance: float = 0.5, speed: str = "medium") -> Dict[str, Any]:
         """Move the robot in a specified direction."""
