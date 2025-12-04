@@ -80,6 +80,7 @@ class CloudAssistant:
         self.processor = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self._compiled = False
+        self.last_tool_result = None  # Store last tool result for metadata extraction
         
         # Initialize tool executor if enabled
         self.tool_executor = None
@@ -307,6 +308,7 @@ Answer:"""
         
         # Use fast keyword matching for tool detection (skip if disabled to prevent recursion)
         tool_result = None
+        self.last_tool_result = None  # Store for language detection
         if self.enable_tools and self.tool_executor and not disable_tools:
             tool_request = self.tool_executor.detect_tool_use(question)
             if tool_request:
@@ -316,6 +318,9 @@ Answer:"""
                 tool_result = loop.run_until_complete(
                     self.tool_executor.execute(tool_request['tool'], tool_request['params'])
                 )
+                
+                # Store tool result for language extraction
+                self.last_tool_result = tool_result
                 
                 # If tool executed successfully, return result DIRECTLY
                 if tool_result and tool_result.get("success"):
@@ -534,6 +539,36 @@ Answer:"""
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             return loop
+    
+    def get_response_language(self) -> str:
+        """
+        Get the target language from last tool result if it was a translation.
+        Returns language code or 'en' if not a translation.
+        """
+        if self.last_tool_result and self.last_tool_result.get("success"):
+            data = self.last_tool_result.get("data", {})
+            if data and "target_language" in data:
+                # Extract ISO code from display language like "Chinese (中文)"
+                target_lang = data["target_language"]
+                # Map back to ISO codes
+                lang_map = {
+                    "Chinese": "zh",
+                    "Spanish": "es",
+                    "French": "fr",
+                    "German": "de",
+                    "Italian": "it",
+                    "Portuguese": "pt",
+                    "Russian": "ru",
+                    "Japanese": "ja",
+                    "Korean": "ko",
+                    "Arabic": "ar",
+                    "Hindi": "hi",
+                    "English": "en",
+                }
+                for lang_name, code in lang_map.items():
+                    if lang_name in target_lang:
+                        return code
+        return "en"
     
     def extract_movement(self, response: str, query: str) -> Optional[Dict[str, Any]]:
         """Extract movement commands from text (English only)."""

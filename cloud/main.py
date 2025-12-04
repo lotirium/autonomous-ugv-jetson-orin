@@ -211,7 +211,9 @@ class RobotConnection:
                     None, self.server.assistant.ask, query
                 )
             
-            await self.send_speak(websocket, response)
+            # Check if response is from translation tool (needs target language TTS)
+            response_language = self.server.assistant.get_response_language()
+            await self.send_speak(websocket, response, language=response_language)
             
             # Check for movement commands
             movement = self.server.assistant.extract_movement(response, query)
@@ -224,13 +226,19 @@ class RobotConnection:
     
     # === Commands to robot ===
     
-    async def send_speak(self, websocket: WebSocketServerProtocol, text: str):
-        """Send TTS to robot."""
+    async def send_speak(self, websocket: WebSocketServerProtocol, text: str, language: str = "en"):
+        """
+        Send TTS to robot.
+        
+        Args:
+            text: Text to speak
+            language: Language code for TTS (default: 'en')
+        """
         audio_b64 = None
         if self.server.speech:
             try:
                 audio_bytes = await asyncio.get_event_loop().run_in_executor(
-                    None, self.server.speech.synthesize, text
+                    None, self.server.speech.synthesize, text, language
                 )
                 if audio_bytes:
                     audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
@@ -239,7 +247,10 @@ class RobotConnection:
         
         msg = {"type": "speak", "text": text, "audio_base64": audio_b64}
         await websocket.send(json.dumps(msg))
-        logger.info(f"🔊 Sent: '{text[:50]}...'")
+        if language != "en":
+            logger.info(f"🔊 Sent ({language}): '{text[:50]}...'")
+        else:
+            logger.info(f"🔊 Sent: '{text[:50]}...'")
     
     async def send_move(self, websocket: WebSocketServerProtocol,
                         direction: str, distance: float = 0.5, speed: str = "medium"):
