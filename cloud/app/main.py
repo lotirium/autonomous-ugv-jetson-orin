@@ -928,17 +928,26 @@ async def voice_websocket(websocket: WebSocket):
                                         "text": response
                                     })
                                     
-                                    # Send TTS command to Pi speakers via HTTP
+                                    # Send TTS command to Pi speakers via HTTP with language support
                                     try:
+                                        # Get target language from translation tool if used
+                                        response_language = "en"
+                                        if hasattr(assistant, 'get_response_language'):
+                                            response_language = assistant.get_response_language()
+                                        
                                         # Get Pi IP from environment or use default
                                         pi_ip = os.getenv("ROVY_ROBOT_IP", "100.72.107.106")
                                         pi_url = f"http://{pi_ip}:8000/speak"
-                                        LOGGER.info(f"🔊 Sending TTS to Pi at {pi_url}...")
+                                        
+                                        if response_language != "en":
+                                            LOGGER.info(f"🔊 Sending TTS to Pi at {pi_url} (language: {response_language})...")
+                                        else:
+                                            LOGGER.info(f"🔊 Sending TTS to Pi at {pi_url}...")
                                         
                                         async with httpx.AsyncClient(timeout=10.0) as client:
                                             pi_response = await client.post(
                                                 pi_url, 
-                                                json={"text": response}
+                                                json={"text": response, "language": response_language}
                                             )
                                             if pi_response.status_code == 200:
                                                 LOGGER.info("✅ TTS played on Pi speakers")
