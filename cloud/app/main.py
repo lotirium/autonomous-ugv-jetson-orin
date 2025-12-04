@@ -847,19 +847,23 @@ async def voice_websocket(websocket: WebSocket):
                     
                     sample_rate = data.get("sampleRate", 16000)
                     
-                    # Transcribe audio
+                    # Transcribe audio with language detection
                     speech = _get_speech()
                     if speech:
                         try:
                             audio_bytes = base64.b64decode(full_audio_b64)
-                            transcript = await anyio.to_thread.run_sync(
+                            result = await anyio.to_thread.run_sync(
                                 speech.transcribe, audio_bytes, sample_rate
                             )
                             
-                            if transcript:
+                            if result:
+                                transcript = result.get("text")
+                                detected_language = result.get("language", "en")
+                                
                                 await websocket.send_json({
                                     "type": "transcript",
-                                    "text": transcript
+                                    "text": transcript,
+                                    "language": detected_language
                                 })
                                 
                                 # Get AI response (with vision if asking about camera/image)
@@ -919,15 +923,18 @@ async def voice_websocket(websocket: WebSocket):
                                         "text": response
                                     })
                                     
-                                    # Send TTS command to Pi speakers via HTTP
+                                    # Send TTS command to Pi speakers via HTTP with language support
                                     try:
                                         # Get Pi IP from environment or use default
                                         pi_ip = os.getenv("ROVY_ROBOT_IP", "100.72.107.106")
                                         pi_url = f"http://{pi_ip}:8000/speak"
-                                        LOGGER.info(f"🔊 Sending TTS to Pi at {pi_url}...")
+                                        LOGGER.info(f"🔊 Sending TTS to Pi at {pi_url} (language: {detected_language})...")
                                         
                                         async with httpx.AsyncClient(timeout=10.0) as client:
-                                            pi_response = await client.post(pi_url, json={"text": response})
+                                            pi_response = await client.post(
+                                                pi_url, 
+                                                json={"text": response, "language": detected_language}
+                                            )
                                             if pi_response.status_code == 200:
                                                 LOGGER.info("✅ TTS played on Pi speakers")
                                             else:
@@ -1077,17 +1084,25 @@ async def vision_endpoint(request: VisionRequest) -> VisionResponse:
 
 @app.post("/stt", tags=["AI"])
 async def speech_to_text(audio: UploadFile = File(...)):
-    """Convert speech to text using Whisper."""
+    """Convert speech to text using Whisper with automatic language detection."""
     speech = _get_speech()
     if not speech:
         raise HTTPException(status_code=503, detail="Speech processor not available")
     
     try:
         audio_bytes = await audio.read()
-        transcript = await anyio.to_thread.run_sync(
+        result = await anyio.to_thread.run_sync(
             speech.transcribe, audio_bytes, 16000
         )
-        return {"text": transcript, "success": bool(transcript)}
+        
+        if result:
+            return {
+                "text": result.get("text"),
+                "language": result.get("language", "en"),
+                "success": True
+            }
+        else:
+            return {"text": None, "language": "en", "success": False}
     except Exception as e:
         LOGGER.error(f"STT error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1095,17 +1110,19 @@ async def speech_to_text(audio: UploadFile = File(...)):
 
 @app.post("/tts", tags=["AI"])
 async def text_to_speech(request: dict):
-    """Convert text to speech."""
+    """Convert text to speech with optional language specification."""
     speech = _get_speech()
     if not speech:
         raise HTTPException(status_code=503, detail="Speech processor not available")
     
     text = request.get("text", "")
+    language = request.get("language", "en")  # Default to English
+    
     if not text:
         raise HTTPException(status_code=400, detail="No text provided")
     
     try:
-        audio_bytes = await anyio.to_thread.run_sync(speech.synthesize, text)
+        audio_bytes = await anyio.to_thread.run_sync(speech.synthesize, text, language)
         if audio_bytes:
             return Response(content=audio_bytes, media_type="audio/wav")
         else:
