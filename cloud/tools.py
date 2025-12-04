@@ -126,11 +126,12 @@ class ToolExecutor:
         translate_keywords = ['translate', 'traduire', 'traducir', 'übersetzen', 'tradurre', 'traduzir', '翻訳', '翻译']
         if any(kw in query_lower for kw in translate_keywords):
             # Pattern: "translate to [language] [text]" or "translate [text] to [language]"
+            # More flexible patterns that handle punctuation
             patterns = [
-                r'translate\s+to\s+(\w+)\s+(.+)',  # "translate to Chinese I love you"
+                r'translate\s+to\s+(\w+)[\s\.,;:]+(.+)',  # "translate to Chinese. I love you" or "translate to Chinese I love you"
                 r'translate\s+(.+?)\s+to\s+(\w+)',  # "translate I love you to Chinese"
-                r'traduire\s+en\s+(\w+)\s+(.+)',  # French: "traduire en chinois je t'aime"
-                r'traducir\s+a(?:l)?\s+(\w+)\s+(.+)',  # Spanish: "traducir al chino te amo"
+                r'traduire\s+en\s+(\w+)[\s\.,;:]+(.+)',  # French: "traduire en chinois. je t'aime"
+                r'traducir\s+a(?:l)?\s+(\w+)[\s\.,;:]+(.+)',  # Spanish: "traducir al chino. te amo"
             ]
             
             for pattern in patterns:
@@ -141,6 +142,8 @@ class ToolExecutor:
                         if pattern.startswith(r'translate\s+to') or 'en' in pattern or 'a' in pattern:
                             target_lang = match.group(1).strip()
                             text = match.group(2).strip()
+                            # Clean up punctuation from text
+                            text = text.strip('.,;:!?')
                         else:
                             # Text first, language second (for "translate X to Y")
                             text = match.group(1).strip()
@@ -219,34 +222,36 @@ class ToolExecutor:
             return {"tool": "play_music", "params": {"action": action, "query": ""}}
         
         # Robot movement (multilingual)
-        movement_keywords = ['move', 'go', 'drive', 'turn', 'avanza', 'mueve', 'gira', 've', 'avance', 'tourne', 'fahre', 'geh', 'vai', 'двигайся', '動く', '移动']
-        if any(kw in query_lower for kw in movement_keywords):
-            direction = "forward"  # default
-            distance = 0.5
-            speed = "medium"
-            
-            # Detect direction (multilingual)
-            if any(kw in query_lower for kw in ['forward', 'ahead', 'straight', 'adelante', 'avant', 'vorwärts', 'avanti', 'frente', 'вперёд', 'вперед', '前', '前进']):
-                direction = "forward"
-            elif any(kw in query_lower for kw in ['backward', 'back', 'reverse', 'atrás', 'arrière', 'rückwärts', 'indietro', 'trás', 'назад', '後ろ', '后退']):
-                direction = "backward"
-            elif any(kw in query_lower for kw in ['left', 'izquierda', 'gauche', 'links', 'sinistra', 'esquerda', 'налево', '左']):
-                direction = "left"
-            elif any(kw in query_lower for kw in ['right', 'derecha', 'droite', 'rechts', 'destra', 'direita', 'направо', '右']):
-                direction = "right"
-            
-            # Detect speed (multilingual)
-            if any(kw in query_lower for kw in ['fast', 'quick', 'rápido', 'vite', 'schnell', 'veloce', 'быстро', '速く', '快']):
-                speed = "fast"
-            elif any(kw in query_lower for kw in ['slow', 'slowly', 'lento', 'lentement', 'langsam', 'lentamente', 'devagar', 'медленно', 'ゆっくり', '慢']):
-                speed = "slow"
-            
-            # Detect distance (optional - look for numbers with units in multiple languages)
-            distance_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:meter|metre|metro|метр|m\b)', query_lower)
-            if distance_match:
-                distance = float(distance_match.group(1))
-            
-            return {"tool": "move_robot", "params": {"direction": direction, "distance": distance, "speed": speed}}
+        # Skip if this is a translation request
+        if not any(kw in query_lower for kw in translate_keywords):
+            movement_keywords = ['move', 'go', 'drive', 'turn', 'avanza', 'mueve', 'gira', 've', 'avance', 'tourne', 'fahre', 'geh', 'vai', 'двигайся', '動く', '移动']
+            if any(kw in query_lower for kw in movement_keywords):
+                direction = "forward"  # default
+                distance = 0.5
+                speed = "medium"
+                
+                # Detect direction (multilingual)
+                if any(kw in query_lower for kw in ['forward', 'ahead', 'straight', 'adelante', 'avant', 'vorwärts', 'avanti', 'frente', 'вперёд', 'вперед', '前', '前进']):
+                    direction = "forward"
+                elif any(kw in query_lower for kw in ['backward', 'back', 'reverse', 'atrás', 'arrière', 'rückwärts', 'indietro', 'trás', 'назад', '後ろ', '后退']):
+                    direction = "backward"
+                elif any(kw in query_lower for kw in ['left', 'izquierda', 'gauche', 'links', 'sinistra', 'esquerda', 'налево', '左']):
+                    direction = "left"
+                elif any(kw in query_lower for kw in ['right', 'derecha', 'droite', 'rechts', 'destra', 'direita', 'направо', '右']):
+                    direction = "right"
+                
+                # Detect speed (multilingual)
+                if any(kw in query_lower for kw in ['fast', 'quick', 'rápido', 'vite', 'schnell', 'veloce', 'быстро', '速く', '快']):
+                    speed = "fast"
+                elif any(kw in query_lower for kw in ['slow', 'slowly', 'lento', 'lentement', 'langsam', 'lentamente', 'devagar', 'медленно', 'ゆっくり', '慢']):
+                    speed = "slow"
+                
+                # Detect distance (optional - look for numbers with units in multiple languages)
+                distance_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:meter|metre|metro|метр|m\b)', query_lower)
+                if distance_match:
+                    distance = float(distance_match.group(1))
+                
+                return {"tool": "move_robot", "params": {"direction": direction, "distance": distance, "speed": speed}}
         
         # Reminders
         if 'remind' in query_lower:
