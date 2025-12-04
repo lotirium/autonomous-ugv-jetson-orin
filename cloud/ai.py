@@ -280,8 +280,16 @@ Answer:"""
             return 'previous'
         return 'play'
     
-    def ask(self, question: str, max_tokens: int = None, temperature: float = 0.3) -> str:
-        """Ask a text-only question with LLM-based routing and optional tool calling."""
+    def ask(self, question: str, max_tokens: int = None, temperature: float = 0.3, disable_tools: bool = False) -> str:
+        """
+        Ask a text-only question with LLM-based routing and optional tool calling.
+        
+        Args:
+            question: The question to ask
+            max_tokens: Maximum tokens in response
+            temperature: Sampling temperature
+            disable_tools: If True, skip tool detection (prevents recursion)
+        """
         if not self.model:
             self._load_model()
             if not self.model:
@@ -297,9 +305,9 @@ Answer:"""
         start = time.time()
         question_len = len(question.split())
         
-        # Use fast keyword matching for tool detection
+        # Use fast keyword matching for tool detection (skip if disabled to prevent recursion)
         tool_result = None
-        if self.enable_tools and self.tool_executor:
+        if self.enable_tools and self.tool_executor and not disable_tools:
             tool_request = self.tool_executor.detect_tool_use(question)
             if tool_request:
                 logger.info(f"Tool detected: {tool_request['tool']}")

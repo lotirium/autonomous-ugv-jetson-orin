@@ -957,9 +957,10 @@ class ToolExecutor:
                 assistant = CloudAssistant()
             
             # Get translation using asyncio.to_thread to avoid event loop conflicts
+            # IMPORTANT: disable_tools=True prevents infinite recursion!
             import asyncio
             translation = await asyncio.to_thread(
-                assistant.ask, prompt, 150, 0.1
+                assistant.ask, prompt, 150, 0.1, True  # disable_tools=True
             )
             
             # Clean up the response (remove any extra explanations)
