@@ -85,7 +85,8 @@ export default function AgenticVoiceScreen() {
   const [recordingError, setRecordingError] = useState<string | null>(null);
   const [voiceLog, setVoiceLog] = useState<VoiceLogEntry[]>([]);
   const [detectedGesture, setDetectedGesture] = useState<'like' | 'heart' | 'none'>('none');
-  const [gestureEmotionTimeout, setGestureEmotionTimeout] = useState<ReturnType<typeof setTimeout> | null>(null);
+  const lastProcessedGestureRef = useRef<'like' | 'heart' | 'none'>('none');
+  const gestureTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   
   // Gesture detection will come from robot via WebSocket or status updates
 
@@ -106,22 +107,46 @@ export default function AgenticVoiceScreen() {
   };
 
   // Handle gesture detection from robot (sent via status updates)
+  // Gestures stay active for 5 seconds after detection
   const handleGestureDetected = useCallback((gesture: 'like' | 'heart' | 'none') => {
-    setDetectedGesture(gesture);
-    
-    // Clear existing timeout
-    if (gestureEmotionTimeout) {
-      clearTimeout(gestureEmotionTimeout);
+    // Only update if gesture actually changed
+    if (lastProcessedGestureRef.current === gesture) {
+      return; // No change, skip update
     }
     
-    // Reset gesture after 2 seconds if no new gesture is detected
+    // Clear existing timeout when gesture changes
+    if (gestureTimeoutRef.current) {
+      clearTimeout(gestureTimeoutRef.current);
+      gestureTimeoutRef.current = null;
+    }
+    
+    // If a gesture (heart/like) is detected, set it and keep it for 5 seconds
     if (gesture !== 'none') {
-      const timeout = setTimeout(() => {
-        setDetectedGesture('none');
-      }, 2000);
-      setGestureEmotionTimeout(timeout);
+      // Update ref and state
+      lastProcessedGestureRef.current = gesture;
+      setDetectedGesture(gesture);
+      console.log(`[Gesture] Changed to: ${gesture}`);
+      
+      // Set timeout to reset after 5 seconds
+      gestureTimeoutRef.current = setTimeout(() => {
+        // Only reset if gesture is still the same (hasn't changed)
+        if (lastProcessedGestureRef.current === gesture) {
+          setDetectedGesture('none');
+          lastProcessedGestureRef.current = 'none';
+          gestureTimeoutRef.current = null;
+          console.log('[Gesture] Reset to: none (after 5 seconds)');
+        }
+      }, 5000); // 5 seconds
+    } else {
+      // When 'none' is detected, only update if no gesture is currently active
+      // This prevents 'none' from interrupting an active gesture timer
+      if (lastProcessedGestureRef.current === 'none') {
+        return; // Already 'none', no need to update
+      }
+      // If a gesture is active, the timeout will handle the reset
+      // Don't immediately change to 'none' - let the timer expire
     }
-  }, [gestureEmotionTimeout]);
+  }, []); // No dependencies - uses refs which don't change
 
   const isOnline = Boolean(status?.network?.ip);
   
@@ -221,10 +246,13 @@ export default function AgenticVoiceScreen() {
         }
 
         // Extract gesture data from camera stream (real-time updates)
+        // Only update when gesture actually changes to prevent animation flicker
         if (data.gesture !== undefined) {
           const gesture = data.gesture as 'like' | 'heart' | 'none';
-          // Only update if confidence is above threshold (gesture handler will check for changes)
-          if (gesture === 'none' || (data.gesture_confidence ?? 0) > 0.5) {
+          const confidence = data.gesture_confidence ?? 0;
+          // Only process if confidence is above threshold
+          if (gesture === 'none' || confidence > 0.5) {
+            // handleGestureDetected will check if gesture changed internally
             handleGestureDetected(gesture);
           }
         }
@@ -618,11 +646,12 @@ export default function AgenticVoiceScreen() {
   // Cleanup gesture timeout on unmount
   useEffect(() => {
     return () => {
-      if (gestureEmotionTimeout) {
-        clearTimeout(gestureEmotionTimeout);
+      if (gestureTimeoutRef.current) {
+        clearTimeout(gestureTimeoutRef.current);
+        gestureTimeoutRef.current = null;
       }
     };
-  }, [gestureEmotionTimeout]);
+  }, []);
 
   return (
     <SafeAreaView style={styles.safeArea} edges={["top", "bottom"]}>
@@ -669,6 +698,7 @@ export default function AgenticVoiceScreen() {
             isStreaming={isCameraStreaming}
             error={cameraError}
             onToggleStream={handleToggleCamera}
+            detectedGesture={detectedGesture}
           />
         </View>
 

@@ -18,6 +18,7 @@ import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 const AnimatedEllipse = Animated.createAnimatedComponent(Ellipse);
 const AnimatedG = Animated.createAnimatedComponent(G);
+const AnimatedPath = Animated.createAnimatedComponent(Path);
 
 type Emotion = 'happy' | 'excited' | 'curious' | 'thinking' | 'neutral' | 'love' | 'sleepy' | 'surprised' | 'bored' | 'hurt';
 
@@ -66,10 +67,17 @@ export function RobotEyes({ emotion = 'neutral', isOnline = true }: RobotEyesPro
     setCurrentEmotion(emotion);
   }, [emotion]);
 
-  // Animate to emotion
+  // Animate to emotion - smooth transitions
   useEffect(() => {
-    eyeHeight.value = withTiming(eyeConfig.height, { duration: 400, easing: Easing.out(Easing.ease) });
-    pupilScale.value = withTiming(eyeConfig.pupilScale, { duration: 400 });
+    const config = getEyeConfig();
+    eyeHeight.value = withTiming(config.height, { 
+      duration: 600, 
+      easing: Easing.out(Easing.cubic) 
+    });
+    pupilScale.value = withTiming(config.pupilScale, { 
+      duration: 600,
+      easing: Easing.out(Easing.cubic)
+    });
   }, [currentEmotion]);
 
   // Blinking
@@ -270,6 +278,21 @@ export function RobotEyes({ emotion = 'neutral', isOnline = true }: RobotEyesPro
     };
   });
 
+  // Animated props for heart eyes opacity
+  const leftHeartProps = useAnimatedProps(() => {
+    const blinkOpacity = interpolate(blinkProgress.value, [0, 0.5, 1], [1, 0.3, 0]);
+    return {
+      opacity: blinkOpacity,
+    };
+  });
+
+  const rightHeartProps = useAnimatedProps(() => {
+    const blinkOpacity = interpolate(blinkProgress.value, [0, 0.5, 1], [1, 0.3, 0]);
+    return {
+      opacity: blinkOpacity,
+    };
+  });
+
   const containerProps = useAnimatedProps(() => ({
     // No transform - keep it simple and realistic
   }));
@@ -347,10 +370,10 @@ export function RobotEyes({ emotion = 'neutral', isOnline = true }: RobotEyesPro
             {/* Render based on style */}
             {eyeConfig.style === 'heart' ? (
               // Heart-shaped pupil
-              <Path
+              <AnimatedPath
                 d="M 75,85 C 75,85 60,73 60,65 C 60,58 65,55 70,55 C 73,55 75,57 75,57 C 75,57 77,55 80,55 C 85,55 90,58 90,65 C 90,73 75,85 75,85 Z"
                 fill="#FF6B9D"
-                opacity={interpolate(blinkProgress.value, [0, 0.5, 1], [1, 0.3, 0])}
+                animatedProps={leftHeartProps}
               />
             ) : eyeConfig.style === 'hurt' ? (
               // > hurt eye (right angle only for left eye)
@@ -387,10 +410,10 @@ export function RobotEyes({ emotion = 'neutral', isOnline = true }: RobotEyesPro
             {/* Render based on style */}
             {eyeConfig.style === 'heart' ? (
               // Heart-shaped pupil
-              <Path
+              <AnimatedPath
                 d="M 225,85 C 225,85 210,73 210,65 C 210,58 215,55 220,55 C 223,55 225,57 225,57 C 225,57 227,55 230,55 C 235,55 240,58 240,65 C 240,73 225,85 225,85 Z"
                 fill="#FF6B9D"
-                opacity={interpolate(blinkProgress.value, [0, 0.5, 1], [1, 0.3, 0])}
+                animatedProps={rightHeartProps}
               />
             ) : eyeConfig.style === 'hurt' ? (
               // < hurt eye (left angle only for right eye)
