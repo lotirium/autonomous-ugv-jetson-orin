@@ -1,3 +1,5 @@
+import * as FileSystem from 'expo-file-system/legacy';
+import { Platform } from 'react-native';
 import { DEFAULT_CLOUD_URL } from './cloud-api';
 
 export type DetectedGesture = 'like' | 'heart' | 'none';
@@ -33,28 +35,65 @@ export class GestureDetectionService {
       }
       this.lastDetectionTime = now;
 
-      // Convert data URI to blob
+      // Extract base64 data from data URI
       const base64Data = imageDataUri.split(',')[1] || imageDataUri;
-      const byteCharacters = atob(base64Data);
-      const byteNumbers = new Array(byteCharacters.length);
-      for (let i = 0; i < byteCharacters.length; i++) {
-        byteNumbers[i] = byteCharacters.charCodeAt(i);
-      }
-      const byteArray = new Uint8Array(byteNumbers);
-      const blob = new Blob([byteArray], { type: 'image/jpeg' });
 
-      // Create form data
+      // For React Native, we need to save the base64 image to a temporary file
+      // because FormData doesn't support Blob or data URIs directly
+      const fileName = `gesture_${Date.now()}.jpg`;
+      const fileUri = `${FileSystem.cacheDirectory}${fileName}`;
+      
+      // Write base64 data to file
+      await FileSystem.writeAsStringAsync(fileUri, base64Data, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      // Verify file was written
+      const fileInfo = await FileSystem.getInfoAsync(fileUri);
+      if (!fileInfo.exists) {
+        console.warn('Failed to write gesture detection file');
+        return 'none';
+      }
+
+      // Platform-specific file URI handling
+      // iOS needs file:// prefix for FormData
+      const finalUri = Platform.OS === 'ios' 
+        ? (fileUri.startsWith('file://') ? fileUri : `file://${fileUri}`)
+        : fileUri;
+
+      // Create FormData with file URI (React Native format)
+      // React Native FormData requires: { uri, type, name }
       const formData = new FormData();
-      formData.append('file', blob, 'gesture.jpg');
+      formData.append('file', {
+        uri: finalUri,
+        type: 'image/jpeg',
+        name: fileName,
+      } as any);
 
       // Send to server
-      const response = await fetch(`${this.baseUrl}/gesture/detect`, {
+      // Note: Don't set Content-Type header - React Native sets it automatically with boundary
+      const requestUrl = `${this.baseUrl}/gesture/detect`;
+      console.log('Sending gesture detection request to:', requestUrl);
+      
+      const response = await fetch(requestUrl, {
         method: 'POST',
         body: formData,
       });
 
+      // Clean up temporary file (even if request fails)
+      try {
+        await FileSystem.deleteAsync(fileUri, { idempotent: true });
+      } catch (cleanupError) {
+        console.warn('Failed to delete temporary gesture file', cleanupError);
+      }
+
       if (!response.ok) {
-        console.warn('Gesture detection failed:', response.statusText);
+        const errorText = await response.text().catch(() => 'Unknown error');
+        console.warn('Gesture detection failed:', {
+          status: response.status,
+          statusText: response.statusText,
+          error: errorText,
+        });
         return 'none';
       }
 
@@ -67,7 +106,11 @@ export class GestureDetectionService {
 
       return 'none';
     } catch (error) {
-      console.error('Gesture detection error:', error);
+      console.error('Gesture detection error:', {
+        error,
+        baseUrl: this.baseUrl,
+        message: error instanceof Error ? error.message : String(error),
+      });
       return 'none';
     }
   }

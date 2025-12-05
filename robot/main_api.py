@@ -145,6 +145,8 @@ class RobotServer:
     def __init__(self):
         self.running = False
         self.ws = None  # Cloud WebSocket connection
+        self.current_gesture = 'none'  # Current detected gesture
+        self.gesture_confidence = 0.0
         self.rover = None
         self.camera = None
         self.camera_type = None  # 'oakd' or 'usb'
@@ -531,6 +533,75 @@ class RobotServer:
         
         return False
     
+    async def detect_gesture_from_frame(self, image_bytes: bytes):
+        """Detect gesture from OAK-D camera frame using cloud server."""
+        try:
+            # Try aiohttp first (async, better for this use case)
+            try:
+                import aiohttp
+                aiohttp_available = True
+            except ImportError:
+                aiohttp_available = False
+            
+            # Cloud server HTTP URL (not WebSocket)
+            cloud_http_url = config.SERVER_URL.replace('ws://', 'http://').replace('wss://', 'https://')
+            cloud_http_url = cloud_http_url.replace(':8765', ':8000')  # FastAPI runs on 8000
+            
+            if aiohttp_available:
+                # Use aiohttp for async HTTP requests
+                form_data = aiohttp.FormData()
+                form_data.add_field('file', 
+                                  image_bytes,
+                                  filename='gesture.jpg',
+                                  content_type='image/jpeg')
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        f"{cloud_http_url}/gesture/detect",
+                        data=form_data,
+                        timeout=aiohttp.ClientTimeout(total=5)
+                    ) as response:
+                        if response.status == 200:
+                            result = await response.json()
+                            gesture = result.get('gesture', 'none')
+                            confidence = result.get('confidence', 0.0)
+                            
+                            if confidence > 0.5:
+                                self.current_gesture = gesture
+                                self.gesture_confidence = confidence
+                                print(f"[Gesture] Detected: {gesture} (confidence: {confidence:.2f})")
+                            else:
+                                self.current_gesture = 'none'
+                                self.gesture_confidence = 0.0
+                        else:
+                            self.current_gesture = 'none'
+            else:
+                # Fallback to requests (sync, but works)
+                import requests
+                files = {'file': ('gesture.jpg', image_bytes, 'image/jpeg')}
+                response = requests.post(
+                    f"{cloud_http_url}/gesture/detect",
+                    files=files,
+                    timeout=5
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    gesture = result.get('gesture', 'none')
+                    confidence = result.get('confidence', 0.0)
+                    
+                    if confidence > 0.5:
+                        self.current_gesture = gesture
+                        self.gesture_confidence = confidence
+                        print(f"[Gesture] Detected: {gesture} (confidence: {confidence:.2f})")
+                    else:
+                        self.current_gesture = 'none'
+                        self.gesture_confidence = 0.0
+                else:
+                    self.current_gesture = 'none'
+        except Exception as e:
+            # Silently fail - don't spam logs
+            pass
+    
     async def stream_to_cloud(self):
         """Stream audio/video to cloud for AI processing."""
         if not self.ws:
@@ -540,9 +611,11 @@ class RobotServer:
         
         image_interval = 1.0 / config.CAMERA_FPS
         sensor_interval = 5.0
+        gesture_interval = 0.5  # Detect gestures every 500ms
         
         last_image_time = 0
         last_sensor_time = 0
+        last_gesture_time = 0
         
         while self.running and self.ws:
             try:
@@ -560,6 +633,17 @@ class RobotServer:
                             "timestamp": datetime.utcnow().isoformat()
                         }))
                     last_image_time = now
+                
+                # Detect gestures from OAK-D frames (throttled to every 500ms)
+                if (self.camera_type == 'oakd' and 
+                    CAMERA_OK and 
+                    self.camera and 
+                    (now - last_gesture_time) >= gesture_interval):
+                    image_bytes = self.capture_image()
+                    if image_bytes:
+                        # Run gesture detection in background (don't block streaming)
+                        asyncio.create_task(self.detect_gesture_from_frame(image_bytes))
+                    last_gesture_time = now
                 
                 # Send sensor data periodically
                 if self.rover and (now - last_sensor_time) >= sensor_interval:
@@ -812,6 +896,10 @@ async def get_status():
             if voltage:
                 status_data["battery_percent"] = robot.rover.voltage_to_percent(voltage)
             status_data["temperature"] = rover_status.get('temperature')
+    
+    # Include current gesture detection result
+    status_data["gesture"] = robot.current_gesture
+    status_data["gesture_confidence"] = robot.gesture_confidence
     
     return status_data
 

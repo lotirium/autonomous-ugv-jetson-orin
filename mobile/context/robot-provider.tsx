@@ -185,6 +185,8 @@ export const RobotProvider = ({ children }: React.PropsWithChildren) => {
         uptimeSeconds: telemetry?.uptimeSeconds ?? health?.uptimeSeconds,
         mode:
           mode?.mode ?? mode?.current ?? mode?.status ?? combinedNetwork?.mode,
+        gesture: telemetry?.gesture,
+        gesture_confidence: telemetry?.gesture_confidence,
       };
 
       setStatus(combined);

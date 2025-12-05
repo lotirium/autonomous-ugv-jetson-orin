@@ -42,6 +42,8 @@ export interface RobotTelemetry {
   humidity?: number;
   uptimeSeconds?: number;
   network?: RobotNetworkInfo;
+  gesture?: 'like' | 'heart' | 'none';
+  gesture_confidence?: number;
   [key: string]: unknown;
 }
 

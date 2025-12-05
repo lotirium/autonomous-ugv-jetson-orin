@@ -18,7 +18,6 @@ import Animated, {
 
 import { CameraVideo } from '@/components/camera-video';
 import { RobotEyes } from '@/components/robot-eyes-svg';
-import { GestureDetectionCamera } from '@/components/gesture-detection-camera';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { IconSymbol } from '@/components/ui/icon-symbol';
@@ -87,6 +86,8 @@ export default function AgenticVoiceScreen() {
   const [voiceLog, setVoiceLog] = useState<VoiceLogEntry[]>([]);
   const [detectedGesture, setDetectedGesture] = useState<'like' | 'heart' | 'none'>('none');
   const [gestureEmotionTimeout, setGestureEmotionTimeout] = useState<ReturnType<typeof setTimeout> | null>(null);
+  
+  // Gesture detection will come from robot via WebSocket or status updates
 
   // Animation for recording pulse
   const recordingPulse = useSharedValue(1);
@@ -104,7 +105,7 @@ export default function AgenticVoiceScreen() {
     return 'thinking'; // Partially connected
   };
 
-  // Handle gesture detection
+  // Handle gesture detection from robot (sent via status updates)
   const handleGestureDetected = useCallback((gesture: 'like' | 'heart' | 'none') => {
     setDetectedGesture(gesture);
     
@@ -123,6 +124,14 @@ export default function AgenticVoiceScreen() {
   }, [gestureEmotionTimeout]);
 
   const isOnline = Boolean(status?.network?.ip);
+  
+  // Listen for gesture updates from robot status (robot detects gestures from OAK-D camera)
+  useEffect(() => {
+    const gesture = status?.telemetry?.gesture ?? status?.gesture;
+    if (gesture && gesture !== detectedGesture) {
+      handleGestureDetected(gesture as 'like' | 'heart' | 'none');
+    }
+  }, [status?.telemetry?.gesture, status?.gesture, detectedGesture, handleGestureDetected]);
 
   useEffect(() => {
     if (isRecording) {
@@ -747,13 +756,7 @@ export default function AgenticVoiceScreen() {
           </ThemedView>
         </Animated.View>
 
-        {/* Hidden Gesture Detection Camera - Runs in Background */}
-        <GestureDetectionCamera
-          enabled={isFocused && isAudioConnected}
-          baseUrl={DEFAULT_CLOUD_URL}
-          onGestureDetected={handleGestureDetected}
-          detectionInterval={500}
-        />
+        {/* Gesture detection runs on OAK-D camera stream frames via useEffect */}
       </ThemedView>
     </SafeAreaView>
   );
