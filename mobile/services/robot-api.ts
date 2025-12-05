@@ -34,8 +34,11 @@ export interface RobotHealth {
 
 export interface RobotTelemetry {
   battery?: number;
+  battery_percent?: number;
+  battery_voltage?: number;
   cpuLoad?: number;
   temperatureC?: number;
+  temperature?: number;
   humidity?: number;
   uptimeSeconds?: number;
   network?: RobotNetworkInfo;

@@ -6,64 +6,67 @@ import Animated, { FadeInDown } from 'react-native-reanimated';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { IconSymbol } from '@/components/ui/icon-symbol';
-import { useRobot } from '@/context/robot-provider';
 
-interface StatusItem {
-  label: string;
-  value: string;
+interface Summary {
+  id: string;
+  title: string;
+  type: 'meeting' | 'lecture' | 'conversation' | 'note';
+  content: string;
+  date: Date;
   icon: string;
-  color: string;
 }
 
-export default function StatusScreen() {
-  const { status } = useRobot();
+export default function SummariesScreen() {
 
-  const batteryRaw = status?.battery ?? status?.telemetry?.battery ?? status?.health?.battery;
-  const batteryLevel = typeof batteryRaw === 'number' ? Math.round(batteryRaw) : undefined;
-  const batteryColor = batteryLevel === undefined
-    ? '#67686C'
-    : batteryLevel >= 60
-      ? '#34D399'
-      : batteryLevel >= 30
-        ? '#FBBF24'
-        : '#EF4444';
-
-  const isOnline = Boolean(status?.network?.ip);
-  const wifiSsid = status?.network?.wifiSsid ?? status?.network?.ssid ?? 'Not connected';
-  const ipAddress = status?.network?.ip ?? 'No IP';
-
-  const statusItems: StatusItem[] = useMemo(() => [
+  const summaries: Summary[] = useMemo(() => [
     {
-      label: 'Battery',
-      value: batteryLevel !== undefined ? `${batteryLevel}%` : 'Unknown',
-      icon: 'battery.75',
-      color: batteryColor,
+      id: '1',
+      title: 'Meeting Summary 1',
+      type: 'meeting',
+      content: 'Discussed project timeline and deliverables. Key decisions: launch date set for Q2, team expansion planned for next month.',
+      date: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000), // 2 days ago
+      icon: 'person.2.fill',
     },
     {
-      label: 'WiFi Network',
-      value: wifiSsid,
-      icon: 'wifi',
-      color: isOnline ? '#34D399' : '#67686C',
+      id: '2',
+      title: 'Lecture Summary - AI Fundamentals',
+      type: 'lecture',
+      content: 'Covered neural networks, backpropagation, and gradient descent. Important concepts: activation functions, loss functions, and optimization algorithms.',
+      date: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000), // 5 days ago
+      icon: 'book.fill',
     },
     {
-      label: 'IP Address',
-      value: ipAddress,
-      icon: 'network',
-      color: '#3B82F6',
+      id: '3',
+      title: 'Meeting Summary 2',
+      type: 'meeting',
+      content: 'Weekly standup: reviewed sprint progress, identified blockers, and planned next week\'s tasks. All team members present.',
+      date: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000), // 7 days ago
+      icon: 'person.2.fill',
     },
     {
-      label: 'Connection',
-      value: isOnline ? 'Online' : 'Offline',
-      icon: 'antenna.radiowaves.left.and.right',
-      color: isOnline ? '#34D399' : '#EF4444',
+      id: '4',
+      title: 'Lecture Summary - Machine Learning',
+      type: 'lecture',
+      content: 'Introduction to supervised learning, classification vs regression, and evaluation metrics. Hands-on exercise with scikit-learn.',
+      date: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000), // 10 days ago
+      icon: 'book.fill',
     },
-  ], [batteryLevel, batteryColor, wifiSsid, ipAddress, isOnline]);
-
-  const systemInfo = useMemo(() => [
-    { label: 'Platform', value: 'Raspberry Pi 5' },
-    { label: 'Camera', value: 'OAK-D Stereo' },
-    { label: 'LIDAR', value: 'RPLidar C1' },
-    { label: 'Base', value: 'Waveshare UGV' },
+    {
+      id: '5',
+      title: 'Conversation Summary',
+      type: 'conversation',
+      content: 'User discussed preferences for robot behavior and voice settings. Updated configuration based on feedback.',
+      date: new Date(Date.now() - 12 * 24 * 60 * 60 * 1000), // 12 days ago
+      icon: 'message.fill',
+    },
+    {
+      id: '6',
+      title: 'Quick Note',
+      type: 'note',
+      content: 'Reminder: Check battery levels regularly. Scheduled maintenance for next week.',
+      date: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000), // 14 days ago
+      icon: 'note.text',
+    },
   ], []);
 
   return (
@@ -74,102 +77,45 @@ export default function StatusScreen() {
       >
         <ThemedView style={styles.container}>
           <Animated.View entering={FadeInDown.duration(400)}>
-            <ThemedText type="title">Robot Status</ThemedText>
+            <ThemedText type="title">Summaries</ThemedText>
             <ThemedText style={styles.description}>
-              Real-time telemetry and system information
+              Meeting notes, lecture summaries, and conversation logs
             </ThemedText>
           </Animated.View>
 
-          {/* Live Status Grid */}
+          {/* Summaries */}
           <Animated.View 
             entering={FadeInDown.delay(100).duration(400)}
             style={styles.section}
           >
-            <ThemedText style={styles.sectionTitle}>LIVE TELEMETRY</ThemedText>
-            <View style={styles.statusGrid}>
-              {statusItems.map((item, index) => (
+            <ThemedText style={styles.sectionTitle}>SUMMARIES</ThemedText>
+            <View style={styles.summariesList}>
+              {summaries.map((summary, index) => (
                 <Animated.View 
-                  key={item.label}
-                  entering={FadeInDown.delay(150 + index * 50).duration(400)}
-                  style={styles.statusCard}
+                  key={summary.id}
+                  entering={FadeInDown.delay(150 + index * 50).duration(300)}
                 >
-                  <View style={[styles.statusIconContainer, { backgroundColor: `${item.color}20` }]}>
-                    <IconSymbol name={item.icon} size={24} color={item.color} />
+                  <ThemedView style={styles.summaryCard}>
+                    <View style={styles.summaryHeader}>
+                      <View style={styles.summaryIconContainer}>
+                        <IconSymbol name={summary.icon} size={20} color="#1DD1A1" />
                   </View>
-                  <View style={styles.statusInfo}>
-                    <ThemedText style={styles.statusLabel}>{item.label}</ThemedText>
-                    <ThemedText style={styles.statusValue}>{item.value}</ThemedText>
+                      <View style={styles.summaryTitleContainer}>
+                        <ThemedText style={styles.summaryTitle}>{summary.title}</ThemedText>
+                        <ThemedText style={styles.summaryDate}>
+                          {summary.date.toLocaleDateString('en-US', { 
+                            month: 'short', 
+                            day: 'numeric',
+                            year: 'numeric'
+                          })}
+                        </ThemedText>
                   </View>
+            </View>
+                    <ThemedText style={styles.summaryContent}>{summary.content}</ThemedText>
+            </ThemedView>
                 </Animated.View>
               ))}
             </View>
-          </Animated.View>
-
-          {/* System Info */}
-          <Animated.View 
-            entering={FadeInDown.delay(400).duration(400)}
-            style={styles.section}
-          >
-            <ThemedText style={styles.sectionTitle}>HARDWARE</ThemedText>
-            <ThemedView style={styles.infoCard}>
-              {systemInfo.map((info, index) => (
-                <View key={info.label} style={styles.infoRow}>
-                  <ThemedText style={styles.infoLabel}>{info.label}</ThemedText>
-                  <ThemedText style={styles.infoValue}>{info.value}</ThemedText>
-                </View>
-              ))}
-            </ThemedView>
-          </Animated.View>
-
-          {/* Capabilities */}
-          <Animated.View 
-            entering={FadeInDown.delay(500).duration(400)}
-            style={styles.section}
-          >
-            <ThemedText style={styles.sectionTitle}>ACTIVE FEATURES</ThemedText>
-            <View style={styles.capabilitiesGrid}>
-              {[
-                { label: 'Voice Control', icon: 'mic.fill', active: true },
-                { label: 'Face Recognition', icon: 'person.crop.rectangle', active: true },
-                { label: 'Depth Vision', icon: 'camera.fill', active: true },
-                { label: 'Navigation', icon: 'location.fill', active: false },
-                { label: 'SLAM Mapping', icon: 'map.fill', active: false },
-                { label: 'Object Detection', icon: 'viewfinder', active: true },
-              ].map((cap, index) => (
-                <Animated.View 
-                  key={cap.label}
-                  entering={FadeInDown.delay(550 + index * 40).duration(300)}
-                  style={styles.capabilityChip}
-                >
-                  <IconSymbol 
-                    name={cap.icon} 
-                    size={16} 
-                    color={cap.active ? '#1DD1A1' : '#67686C'} 
-                  />
-                  <ThemedText style={[
-                    styles.capabilityText,
-                    { color: cap.active ? '#E5E7EB' : '#67686C' }
-                  ]}>
-                    {cap.label}
-                  </ThemedText>
-                </Animated.View>
-              ))}
-            </View>
-          </Animated.View>
-
-          {/* Memory placeholder */}
-          <Animated.View 
-            entering={FadeInDown.delay(600).duration(400)}
-            style={styles.section}
-          >
-            <ThemedText style={styles.sectionTitle}>MEMORIES & LOGS</ThemedText>
-            <ThemedView style={styles.memoryCard}>
-              <IconSymbol name="brain" size={48} color="#67686C" />
-              <ThemedText style={styles.emptyTitle}>No memories yet</ThemedText>
-              <ThemedText style={styles.emptyText}>
-                Interact with your robot to start building personalized memories and preferences.
-              </ThemedText>
-            </ThemedView>
           </Animated.View>
         </ThemedView>
       </ScrollView>
@@ -207,108 +153,51 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
     letterSpacing: 1.2,
   },
-  statusGrid: {
+  summariesList: {
     gap: 12,
   },
-  statusCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 16,
+  summaryCard: {
     padding: 16,
     backgroundColor: 'rgba(26, 26, 26, 0.7)',
     borderWidth: 1,
     borderColor: 'rgba(37, 37, 37, 0.6)',
     borderRadius: 12,
+    gap: 12,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.2,
     shadowRadius: 4,
     elevation: 2,
   },
-  statusIconContainer: {
-    width: 48,
-    height: 48,
-    borderRadius: 12,
+  summaryHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  summaryIconContainer: {
+    width: 40,
+    height: 40,
+    borderRadius: 10,
+    backgroundColor: 'rgba(29, 209, 161, 0.15)',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  statusInfo: {
+  summaryTitleContainer: {
     flex: 1,
   },
-  statusLabel: {
-    fontSize: 13,
-    color: '#9CA3AF',
+  summaryTitle: {
+    fontSize: 15,
+    fontFamily: 'JetBrainsMono_600SemiBold',
+    color: '#E5E7EB',
     marginBottom: 2,
   },
-  statusValue: {
-    fontSize: 18,
-    fontFamily: 'JetBrainsMono_600SemiBold',
-    color: '#F9FAFB',
+  summaryDate: {
+    fontSize: 12,
+    color: '#67686C',
   },
-  infoCard: {
-    padding: 16,
-    backgroundColor: 'rgba(26, 26, 26, 0.7)',
-    borderWidth: 1,
-    borderColor: 'rgba(37, 37, 37, 0.6)',
-    borderRadius: 12,
-    gap: 12,
-  },
-  infoRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 8,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: 'rgba(55, 55, 55, 0.4)',
-  },
-  infoLabel: {
+  summaryContent: {
     fontSize: 14,
     color: '#9CA3AF',
-  },
-  infoValue: {
-    fontSize: 14,
-    fontFamily: 'JetBrainsMono_600SemiBold',
-    color: '#E5E7EB',
-  },
-  capabilitiesGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-  },
-  capabilityChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    backgroundColor: 'rgba(26, 26, 26, 0.7)',
-    borderWidth: 1,
-    borderColor: 'rgba(37, 37, 37, 0.6)',
-    borderRadius: 20,
-  },
-  capabilityText: {
-    fontSize: 13,
-    fontFamily: 'JetBrainsMono_600SemiBold',
-  },
-  memoryCard: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 12,
-    padding: 32,
-    backgroundColor: 'rgba(26, 26, 26, 0.7)',
-    borderWidth: 1,
-    borderColor: 'rgba(37, 37, 37, 0.6)',
-    borderRadius: 12,
-  },
-  emptyTitle: {
-    fontSize: 16,
-    fontFamily: 'JetBrainsMono_600SemiBold',
-    color: '#E5E7EB',
-  },
-  emptyText: {
-    fontSize: 14,
-    color: '#9CA3AF',
-    textAlign: 'center',
     lineHeight: 20,
   },
 });

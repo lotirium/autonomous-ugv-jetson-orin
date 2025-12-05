@@ -5,6 +5,7 @@ import { Audio, Recording } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import { useIsFocused } from '@react-navigation/native';
 import Animated, { 
   FadeInDown, 
   FadeIn,
@@ -16,6 +17,7 @@ import Animated, {
 } from 'react-native-reanimated';
 
 import { CameraVideo } from '@/components/camera-video';
+import { RobotEyes } from '@/components/robot-eyes-svg';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { IconSymbol } from '@/components/ui/icon-symbol';
@@ -60,7 +62,8 @@ const buildWebSocketUrl = (baseUrl: string | undefined, path: string) => {
 
 export default function AgenticVoiceScreen() {
   const router = useRouter();
-  const { baseUrl } = useRobot();
+  const { baseUrl, status } = useRobot();
+  const isFocused = useIsFocused();
 
   const cameraWsUrl = useMemo(() => buildWebSocketUrl(baseUrl, '/camera/ws'), [baseUrl]);
   // Audio goes to PC cloud server, not Pi
@@ -69,6 +72,7 @@ export default function AgenticVoiceScreen() {
   const cameraSocket = useRef<WebSocket | null>(null);
   const audioSocket = useRef<WebSocket | null>(null);
   const recordingRef = useRef<Recording | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [currentFrame, setCurrentFrame] = useState<string | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
@@ -83,6 +87,16 @@ export default function AgenticVoiceScreen() {
 
   // Animation for recording pulse
   const recordingPulse = useSharedValue(1);
+
+  // Determine robot emotion based on voice control state
+  const getEmotion = () => {
+    if (isRecording) return 'curious'; // Active listening
+    if (!isAudioConnected && !isCameraStreaming) return 'neutral'; // Not connected
+    if (isAudioConnected && isCameraStreaming) return 'happy'; // Fully connected
+    return 'thinking'; // Partially connected
+  };
+
+  const isOnline = Boolean(status?.network?.ip);
 
   useEffect(() => {
     if (isRecording) {
@@ -124,6 +138,23 @@ export default function AgenticVoiceScreen() {
       return;
     }
 
+    // Don't connect if already connected or connecting
+    if (cameraSocket.current?.readyState === WebSocket.OPEN) {
+      setIsCameraStreaming(true);
+      setIsCameraConnecting(false);
+      return;
+    }
+
+    if (cameraSocket.current?.readyState === WebSocket.CONNECTING) {
+      return; // Already connecting
+    }
+
+    // Close existing connection if any
+    if (cameraSocket.current) {
+      cameraSocket.current.close();
+      cameraSocket.current = null;
+    }
+
     setIsCameraConnecting(true);
     setCameraError(null);
 
@@ -134,6 +165,11 @@ export default function AgenticVoiceScreen() {
       setIsCameraConnecting(false);
       setIsCameraStreaming(true);
       setCameraError(null);
+      // Clear any pending reconnect timeout
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
     };
 
     ws.onmessage = (event) => {
@@ -162,10 +198,30 @@ export default function AgenticVoiceScreen() {
     ws.onclose = () => {
       setIsCameraStreaming(false);
       setIsCameraConnecting(false);
+      
+      // Auto-reconnect if screen is still focused and we have a URL
+      if (isFocused && cameraWsUrl && cameraSocket.current === ws) {
+        // Clear any existing timeout
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current);
+        }
+        // Reconnect after a short delay
+        reconnectTimeoutRef.current = setTimeout(() => {
+          if (isFocused && cameraWsUrl) {
+            connectCamera();
+          }
+        }, 1000);
+      }
     };
-  }, [cameraWsUrl]);
+  }, [cameraWsUrl, isFocused]);
 
   const disconnectCamera = useCallback(() => {
+    // Clear any pending reconnect
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    
     if (cameraSocket.current) {
       cameraSocket.current.close();
       cameraSocket.current = null;
@@ -183,13 +239,32 @@ export default function AgenticVoiceScreen() {
     }
   }, [connectCamera, disconnectCamera, isCameraConnecting, isCameraStreaming]);
 
+  // Connect camera when screen is focused
   useEffect(() => {
-    if (cameraWsUrl && !isCameraStreaming && !isCameraConnecting) {
-      connectCamera();
+    if (isFocused && cameraWsUrl) {
+      // Check if we need to reconnect
+      const socket = cameraSocket.current;
+      if (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
+        // Connection is closed, reconnect
+        if (!isCameraStreaming && !isCameraConnecting) {
+          connectCamera();
+        }
+      } else if (socket.readyState === WebSocket.OPEN) {
+        // Connection is open, just update state
+        setIsCameraStreaming(true);
+        setIsCameraConnecting(false);
+      }
+      // If CONNECTING, just wait
     }
-  }, [cameraWsUrl, connectCamera, isCameraStreaming, isCameraConnecting]);
+  }, [isFocused, cameraWsUrl, connectCamera, isCameraStreaming, isCameraConnecting]);
 
-  useEffect(() => () => disconnectCamera(), [disconnectCamera]);
+  // Only disconnect on actual component unmount (not just blur)
+  useEffect(() => {
+    return () => {
+      // Cleanup on unmount
+      disconnectCamera();
+    };
+  }, [disconnectCamera]);
 
   const connectAudioSocket = useCallback(() => {
     if (!audioWsUrl) {
@@ -229,35 +304,6 @@ export default function AgenticVoiceScreen() {
             label: 'Robot',
             message: `Received ${data.total_chunks} audio chunks successfully`,
             tone: 'info'
-          });
-          return;
-        }
-
-        // Handle AI response with memory
-        if (data.type === 'response') {
-          appendLog({
-            label: 'Jarvis',
-            message: data.text || data.response || 'Response received',
-            tone: 'info'
-          });
-          
-          // Log memory if present
-          if (data.memory && data.memory.facts && data.memory.facts.length > 0) {
-            appendLog({
-              label: 'Memory',
-              message: `Remembered ${data.memory.count} fact(s) about you`,
-              tone: 'info'
-            });
-          }
-          return;
-        }
-
-        // Handle transcription responses
-        if (data.type === 'transcript') {
-          appendLog({
-            label: 'Transcript',
-            message: data.text || data.finalTranscript || '',
-            tone: 'final'
           });
           return;
         }
@@ -538,32 +584,88 @@ export default function AgenticVoiceScreen() {
           <ThemedText type="title">Voice Control</ThemedText>
         </Animated.View>
 
-        <Animated.View 
-          entering={FadeInDown.delay(100).duration(400)}
-          style={styles.statusRow}
-        >
-          <View style={styles.statusPill}>
-            <View style={[styles.statusDot, isCameraStreaming ? styles.statusOn : styles.statusOff]} />
-            <ThemedText style={styles.statusText}>
-              Camera {isCameraStreaming ? 'streaming' : isCameraConnecting ? 'connecting' : 'idle'}
-            </ThemedText>
-          </View>
-          <View style={styles.statusPill}>
-            <View style={[styles.statusDot, isAudioConnected ? styles.statusOn : styles.statusOff]} />
-            <ThemedText style={styles.statusText}>
-              Voice {isAudioConnected ? 'linked' : isAudioConnecting ? 'connecting' : 'disconnected'}
-            </ThemedText>
-          </View>
+        {/* Full Width Robot Eyes with Reduced Height */}
+        <Animated.View entering={FadeIn.delay(50).duration(600)} style={styles.fullWidthEyesContainer}>
+          <RobotEyes emotion={getEmotion()} isOnline={isOnline} />
         </Animated.View>
 
-        <CameraVideo
-          wsUrl={cameraWsUrl}
-          currentFrame={currentFrame}
-          isConnecting={isCameraConnecting}
-          isStreaming={isCameraStreaming}
-          error={cameraError}
-          onToggleStream={handleToggleCamera}
-        />
+        {/* Status Row and Camera - No Gap */}
+        <View style={styles.statusAndCameraContainer}>
+          <Animated.View 
+            entering={FadeInDown.delay(100).duration(400)}
+            style={styles.statusRow}
+          >
+            <View style={styles.statusPill}>
+              <View style={[styles.statusDot, isCameraStreaming ? styles.statusOn : styles.statusOff]} />
+              <ThemedText style={styles.statusText}>
+                Camera {isCameraStreaming ? 'streaming' : isCameraConnecting ? 'connecting' : 'idle'}
+              </ThemedText>
+            </View>
+            <View style={styles.statusPill}>
+              <View style={[styles.statusDot, isAudioConnected ? styles.statusOn : styles.statusOff]} />
+              <ThemedText style={styles.statusText}>
+                Voice {isAudioConnected ? 'linked' : isAudioConnecting ? 'connecting' : 'disconnected'}
+              </ThemedText>
+            </View>
+          </Animated.View>
+
+          <CameraVideo
+            wsUrl={cameraWsUrl}
+            currentFrame={currentFrame}
+            isConnecting={isCameraConnecting}
+            isStreaming={isCameraStreaming}
+            error={cameraError}
+            onToggleStream={handleToggleCamera}
+          />
+        </View>
+
+        <Animated.View entering={FadeInDown.delay(200).duration(400)} style={{ flex: 1 }}>
+          <ThemedView style={styles.logCard}>
+            <View style={styles.logLegend}>
+              <View style={[styles.legendDot, styles.legendRobot]} />
+              <ThemedText style={styles.legendText}>AI</ThemedText>
+              <View style={[styles.legendDot, styles.legendYou]} />
+              <ThemedText style={styles.legendText}>You</ThemedText>
+            </View>
+            <ScrollView style={styles.logScroll} showsVerticalScrollIndicator={false}>
+              {voiceLog.length === 0 ? (
+                <View style={styles.emptyLog}>
+                  <Image
+                    source={require('@/assets/images/rovy.png')}
+                    style={styles.emptyImage}
+                    contentFit="contain"
+                  />
+                  <ThemedText style={styles.emptyTitle}>Ready to chat</ThemedText>
+                  <ThemedText style={styles.emptyText}>
+                    Hold the microphone button to start talking with JARVIS
+                  </ThemedText>
+                </View>
+              ) : (
+                voiceLog.map((entry, index) => (
+                  <Animated.View
+                    key={entry.id}
+                    entering={FadeInDown.delay(index * 30).duration(300)}
+                  >
+                    <View
+                      style={[
+                        styles.logItem,
+                        entry.tone === 'client' ? styles.logItemClient : styles.logItemRobot,
+                      ]}
+                    >
+                      <View style={styles.logItemHeader}>
+                        <ThemedText style={styles.logLabel}>{entry.label}</ThemedText>
+                        <ThemedText style={styles.logTime}>
+                          {entry.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                        </ThemedText>
+                      </View>
+                      <ThemedText style={styles.logMessage}>{entry.message}</ThemedText>
+                    </View>
+                  </Animated.View>
+                ))
+              )}
+            </ScrollView>
+          </ThemedView>
+        </Animated.View>
 
         <Animated.View entering={FadeInDown.delay(300).duration(400)}>
           <ThemedView style={styles.card}>
@@ -609,57 +711,6 @@ export default function AgenticVoiceScreen() {
             ) : null}
           </ThemedView>
         </Animated.View>
-
-        <Animated.View entering={FadeInDown.delay(400).duration(400)} style={{ flex: 1 }}>
-          <ThemedView style={styles.logCard}>
-            <View style={styles.cardHeader}>
-              <ThemedText type="subtitle">Conversation</ThemedText>
-              <View style={styles.logLegend}>
-                <View style={[styles.legendDot, styles.legendRobot]} />
-                <ThemedText style={styles.legendText}>AI</ThemedText>
-                <View style={[styles.legendDot, styles.legendYou]} />
-                <ThemedText style={styles.legendText}>You</ThemedText>
-              </View>
-            </View>
-            <ScrollView style={styles.logScroll} showsVerticalScrollIndicator={false}>
-              {voiceLog.length === 0 ? (
-                <View style={styles.emptyLog}>
-                  <Image
-                    source={require('@/assets/images/rovy.png')}
-                    style={styles.emptyImage}
-                    contentFit="contain"
-                  />
-                  <ThemedText style={styles.emptyTitle}>Ready to chat</ThemedText>
-                  <ThemedText style={styles.emptyText}>
-                    Hold the microphone button to start talking with JARVIS
-                  </ThemedText>
-                </View>
-              ) : (
-                voiceLog.map((entry, index) => (
-                  <Animated.View
-                    key={entry.id}
-                    entering={FadeInDown.delay(index * 30).duration(300)}
-                  >
-                    <View
-                      style={[
-                        styles.logItem,
-                        entry.tone === 'client' ? styles.logItemClient : styles.logItemRobot,
-                      ]}
-                    >
-                      <View style={styles.logItemHeader}>
-                        <ThemedText style={styles.logLabel}>{entry.label}</ThemedText>
-                        <ThemedText style={styles.logTime}>
-                          {entry.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                        </ThemedText>
-                      </View>
-                      <ThemedText style={styles.logMessage}>{entry.message}</ThemedText>
-                    </View>
-                  </Animated.View>
-                ))
-              )}
-            </ScrollView>
-          </ThemedView>
-        </Animated.View>
       </ThemedView>
     </SafeAreaView>
   );
@@ -690,10 +741,22 @@ const styles = StyleSheet.create({
     borderColor: '#202020',
     backgroundColor: '#1C1C1C',
   },
+  fullWidthEyesContainer: {
+    width: '100%',
+    height: 100,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginVertical: 8,
+    overflow: 'hidden',
+  },
+  statusAndCameraContainer: {
+    gap: 0,
+  },
   statusRow: {
     flexDirection: 'row',
     gap: 10,
     alignItems: 'center',
+    marginBottom: 0,
   },
   statusPill: {
     flexDirection: 'row',
@@ -794,7 +857,8 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(15, 21, 18, 0.8)',
     borderRadius: 12,
     padding: 16,
-    gap: 12,
+    paddingTop: 12,
+    gap: 8,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.2,
@@ -868,7 +932,9 @@ const styles = StyleSheet.create({
   logLegend: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'flex-end',
     gap: 8,
+    marginBottom: 8,
   },
   legendDot: {
     width: 10,

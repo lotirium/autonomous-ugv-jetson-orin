@@ -42,13 +42,7 @@ const SECONDARY_ACTIONS = [
     id: 'status',
     label: 'Status',
     icon: 'chart.bar.fill' as const,
-    href: '/(tabs)/status' as const,
-  },
-  {
-    id: 'assistant',
-    label: 'Assistant',
-    icon: 'sparkles' as const,
-    href: '/(tabs)/assistant' as const,
+    href: '/robot-status' as const,
   },
   {
     id: 'settings',
@@ -189,7 +183,7 @@ export default function HomeScreen() {
                     styles.secondaryCard,
                     pressed && styles.secondaryCardPressed,
                   ]}
-                  onPress={() => router.push(action.href as any)}
+                  onPress={() => router.push(action.href)}
                 >
                   <IconSymbol name={action.icon} size={24} color="#E5E7EB" />
                   <ThemedText style={styles.secondaryLabel}>{action.label}</ThemedText>
