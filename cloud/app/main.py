@@ -127,6 +127,15 @@ except ImportError as exc:
     FACE_RECOGNITION_AVAILABLE = False
     FaceRecognitionService = None
     FaceRecognitionError = None
+
+# Gesture detection service
+try:
+    from .gesture_detection import detect_gesture_from_image
+    GESTURE_DETECTION_AVAILABLE = True
+except ImportError as exc:
+    LOGGER.warning("Gesture detection service not available: %s", exc)
+    GESTURE_DETECTION_AVAILABLE = False
+    detect_gesture_from_image = None
 from .models import (
     AddFaceRequest,
     AddFaceResponse,
@@ -1316,6 +1325,33 @@ async def speak_text(request: dict):
         return {"status": "ok", "message": "Speech played"}
     else:
         raise HTTPException(status_code=503, detail="TTS not available")
+
+
+@app.post("/gesture/detect", tags=["AI"])
+async def detect_gesture(file: UploadFile = File(...)):
+    """Detect hand gesture from image (like, heart, etc.)"""
+    if not GESTURE_DETECTION_AVAILABLE or not detect_gesture_from_image:
+        raise HTTPException(status_code=503, detail="Gesture detection not available")
+    
+    try:
+        # Read image bytes
+        image_bytes = await file.read()
+        if len(image_bytes) == 0:
+            raise HTTPException(status_code=400, detail="Empty image file")
+        
+        # Detect gesture
+        gesture, confidence = await anyio.to_thread.run_sync(
+            detect_gesture_from_image, image_bytes
+        )
+        
+        return {
+            "gesture": gesture,
+            "confidence": float(confidence),
+            "status": "ok"
+        }
+    except Exception as e:
+        LOGGER.error(f"Gesture detection error: {e}")
+        raise HTTPException(status_code=500, detail=f"Gesture detection failed: {str(e)}")
 
 
 def _start_oakd_pipeline():

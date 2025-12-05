@@ -39,3 +39,7 @@ piper-tts>=1.2.0
 
 # Spotify integration
 spotipy>=2.25.0
+
+# Gesture detection
+mediapipe>=0.10.0
+opencv-python>=4.8.0

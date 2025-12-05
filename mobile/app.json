@@ -16,6 +16,7 @@
       "infoPlist": {
         "NSBluetoothAlwaysUsageDescription": "Jarvis Controller uses Bluetooth to securely provision and connect to your Jarvis.",
         "NSMicrophoneUsageDescription": "Jarvis Controller uses your microphone to communicate with your Jarvis",
+        "NSCameraUsageDescription": "Jarvis Controller uses your camera to detect hand gestures for interactive robot reactions.",
         "UISupportedInterfaceOrientations": [
           "UIInterfaceOrientationPortrait",
           "UIInterfaceOrientationLandscapeLeft",
@@ -52,6 +53,12 @@
         "expo-av",
         {
           "microphonePermission": "Allow Jarvis Controller to access your microphone."
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Jarvis Controller to access your camera for gesture detection."
         }
       ],
       [

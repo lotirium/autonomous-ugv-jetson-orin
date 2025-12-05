@@ -1,7 +1,7 @@
 import { Image } from 'expo-image';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, View } from 'react-native';
-import { Audio, Recording } from 'expo-av';
+import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -18,6 +18,7 @@ import Animated, {
 
 import { CameraVideo } from '@/components/camera-video';
 import { RobotEyes } from '@/components/robot-eyes-svg';
+import { GestureDetectionCamera } from '@/components/gesture-detection-camera';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { IconSymbol } from '@/components/ui/icon-symbol';
@@ -71,7 +72,7 @@ export default function AgenticVoiceScreen() {
 
   const cameraSocket = useRef<WebSocket | null>(null);
   const audioSocket = useRef<WebSocket | null>(null);
-  const recordingRef = useRef<Recording | null>(null);
+  const recordingRef = useRef<Audio.Recording | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [currentFrame, setCurrentFrame] = useState<string | null>(null);
@@ -84,17 +85,42 @@ export default function AgenticVoiceScreen() {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingError, setRecordingError] = useState<string | null>(null);
   const [voiceLog, setVoiceLog] = useState<VoiceLogEntry[]>([]);
+  const [detectedGesture, setDetectedGesture] = useState<'like' | 'heart' | 'none'>('none');
+  const [gestureEmotionTimeout, setGestureEmotionTimeout] = useState<ReturnType<typeof setTimeout> | null>(null);
 
   // Animation for recording pulse
   const recordingPulse = useSharedValue(1);
 
-  // Determine robot emotion based on voice control state
+  // Determine robot emotion based on voice control state and gestures
   const getEmotion = () => {
+    // Gesture-based emotions take priority
+    if (detectedGesture === 'heart') return 'love'; // Heart gesture → heart eyes
+    if (detectedGesture === 'like') return 'happy'; // Like gesture → happy
+    
+    // Fall back to state-based emotions
     if (isRecording) return 'curious'; // Active listening
     if (!isAudioConnected && !isCameraStreaming) return 'neutral'; // Not connected
     if (isAudioConnected && isCameraStreaming) return 'happy'; // Fully connected
     return 'thinking'; // Partially connected
   };
+
+  // Handle gesture detection
+  const handleGestureDetected = useCallback((gesture: 'like' | 'heart' | 'none') => {
+    setDetectedGesture(gesture);
+    
+    // Clear existing timeout
+    if (gestureEmotionTimeout) {
+      clearTimeout(gestureEmotionTimeout);
+    }
+    
+    // Reset gesture after 2 seconds if no new gesture is detected
+    if (gesture !== 'none') {
+      const timeout = setTimeout(() => {
+        setDetectedGesture('none');
+      }, 2000);
+      setGestureEmotionTimeout(timeout);
+    }
+  }, [gestureEmotionTimeout]);
 
   const isOnline = Boolean(status?.network?.ip);
 
@@ -571,6 +597,15 @@ export default function AgenticVoiceScreen() {
     }
   }, [appendLog, isAudioConnecting, isAudioConnected, isRecording]);
 
+  // Cleanup gesture timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (gestureEmotionTimeout) {
+        clearTimeout(gestureEmotionTimeout);
+      }
+    };
+  }, [gestureEmotionTimeout]);
+
   return (
     <SafeAreaView style={styles.safeArea} edges={["top", "bottom"]}>
       <ThemedView style={styles.container}>
@@ -711,6 +746,14 @@ export default function AgenticVoiceScreen() {
             ) : null}
           </ThemedView>
         </Animated.View>
+
+        {/* Hidden Gesture Detection Camera - Runs in Background */}
+        <GestureDetectionCamera
+          enabled={isFocused && isAudioConnected}
+          baseUrl={DEFAULT_CLOUD_URL}
+          onGestureDetected={handleGestureDetected}
+          detectionInterval={500}
+        />
       </ThemedView>
     </SafeAreaView>
   );
