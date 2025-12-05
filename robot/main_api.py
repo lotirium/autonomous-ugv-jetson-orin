@@ -73,6 +73,13 @@ except Exception as e:
     ROVER_OK = False
     print(f"WARNING: Rover not available: {e}")
 
+try:
+    import depthai as dai
+    DEPTHAI_OK = True
+except ImportError:
+    DEPTHAI_OK = False
+    print("WARNING: DepthAI not installed. OAK-D camera disabled.")
+
 
 # ==============================================================================
 # Pydantic Models for API
@@ -140,6 +147,9 @@ class RobotServer:
         self.ws = None  # Cloud WebSocket connection
         self.rover = None
         self.camera = None
+        self.camera_type = None  # 'oakd' or 'usb'
+        self.oakd_device = None
+        self.oakd_queue = None
         self.audio_stream = None
         
         # State
@@ -147,6 +157,8 @@ class RobotServer:
         self.audio_buffer = []
         self.last_image = None
         self.last_image_time = 0
+        self.oakd_error_count = 0
+        self.oakd_last_reinit = 0
         
         print("=" * 60)
         print("  ROVY ROBOT SERVER")
@@ -175,10 +187,81 @@ class RobotServer:
             return False
     
     def init_camera(self):
-        """Initialize camera - automatically find USB camera."""
+        """Initialize camera - OAK-D required for manual control, USB as fallback for other uses."""
+        # Try OAK-D camera first (required for manual control)
+        if DEPTHAI_OK:
+            try:
+                print("[Camera] Trying OAK-D camera...")
+                available = dai.Device.getAllAvailableDevices()
+                if available:
+                    print(f"[Camera] Found {len(available)} OAK-D device(s)")
+                    
+                    # Create OAK-D pipeline
+                    pipeline = dai.Pipeline()
+                    
+                    # Create color camera node
+                    if hasattr(dai, "node") and hasattr(dai.node, "ColorCamera"):
+                        camera = pipeline.create(dai.node.ColorCamera)
+                    else:
+                        camera = pipeline.createColorCamera()
+                    
+                    camera.setPreviewSize(config.CAMERA_WIDTH, config.CAMERA_HEIGHT)
+                    camera.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+                    camera.setInterleaved(False)
+                    camera.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+                    # Use higher FPS for manual control (OAK-D can handle 30 FPS)
+                    manual_control_fps = 30
+                    camera.setFps(manual_control_fps)
+                    
+                    # Create XLinkOut for preview
+                    if hasattr(dai, "node") and hasattr(dai.node, "XLinkOut"):
+                        xout = pipeline.create(dai.node.XLinkOut)
+                    else:
+                        xout = pipeline.createXLinkOut()
+                    xout.setStreamName("preview")
+                    camera.preview.link(xout.input)
+                    
+                    # Start pipeline
+                    self.oakd_device = dai.Device(pipeline)
+                    # Use maxSize=4 and blocking=False to get latest frame (drops old frames)
+                    self.oakd_queue = self.oakd_device.getOutputQueue("preview", maxSize=4, blocking=False)
+                    
+                    # Test capture
+                    time.sleep(0.5)  # Give it time to initialize
+                    frame_data = self.oakd_queue.tryGet()
+                    if frame_data is not None:
+                        frame = frame_data.getCvFrame()
+                        if frame is not None:
+                            self.camera_type = 'oakd'
+                            print("[Camera] OAK-D camera ready")
+                            return True
+                        else:
+                            self.oakd_device.close()
+                            self.oakd_device = None
+                            self.oakd_queue = None
+                    else:
+                        self.oakd_device.close()
+                        self.oakd_device = None
+                        self.oakd_queue = None
+            except Exception as e:
+                print(f"[Camera] OAK-D init failed: {e}")
+                print("[Camera] WARNING: Manual control requires OAK-D camera")
+                if self.oakd_device:
+                    try:
+                        self.oakd_device.close()
+                    except:
+                        pass
+                    self.oakd_device = None
+                    self.oakd_queue = None
+        else:
+            print("[Camera] WARNING: DepthAI not available - OAK-D camera cannot be used")
+            print("[Camera] WARNING: Manual control will not work without OAK-D camera")
+        
+        # Fall back to USB camera (for cloud streaming, but not for manual control)
         if not CAMERA_OK:
             return False
         
+        print("[Camera] Trying USB camera...")
         # Try indices in order: 1 (USB Camera), 0, 2
         for camera_index in [1, 0, 2]:
             try:
@@ -190,7 +273,8 @@ class RobotServer:
                 
                 ret, frame = self.camera.read()
                 if ret and frame is not None:
-                    print(f"[Camera] Ready on /dev/video{camera_index}")
+                    self.camera_type = 'usb'
+                    print(f"[Camera] USB camera ready on /dev/video{camera_index}")
                     return True
                 else:
                     self.camera.release()
@@ -230,24 +314,165 @@ class RobotServer:
     
     def init_volume(self):
         """Initialize hardware volume to safe level (85%)."""
+        global HW_CARD
+        # Re-detect card in case it changed
+        if HW_CARD is None:
+            HW_CARD = detect_audio_card()
+        
+        if HW_CARD is None:
+            print("[Volume] ⚠️  No audio card detected, skipping hardware init")
+            return
+        
         try:
             # Set hardware volume to 125 (85% of 147) for optimal quality
-            subprocess.run(
+            result = subprocess.run(
                 ['amixer', '-c', str(HW_CARD), 'sset', 'PCM', str(HW_VOLUME_MAX)],
                 capture_output=True,
+                text=True,
                 timeout=2
             )
-            print(f"[Volume] Hardware initialized to 85% (125/147)")
+            if result.returncode == 0:
+                print(f"[Volume] Hardware initialized to 85% (125/147) on card {HW_CARD}")
+            else:
+                print(f"[Volume] Hardware init failed: {result.stderr}")
         except Exception as e:
             print(f"[Volume] Hardware init failed: {e}")
     
+    def _reinit_oakd(self):
+        """Reinitialize OAK-D camera after error."""
+        # Prevent too frequent reinitializations (max once per 5 seconds)
+        if time.time() - self.oakd_last_reinit < 5:
+            return False
+        
+        self.oakd_last_reinit = time.time()
+        print("[Camera] Attempting to reinitialize OAK-D camera...")
+        
+        # Close existing device
+        if self.oakd_device:
+            try:
+                self.oakd_device.close()
+            except:
+                pass
+            self.oakd_device = None
+            self.oakd_queue = None
+        
+        # Wait a bit for device to be released
+        time.sleep(1.0)
+        
+        # Try to reinitialize OAK-D only
+        if not DEPTHAI_OK:
+            return False
+        
+        try:
+            available = dai.Device.getAllAvailableDevices()
+            if not available:
+                print("[Camera] No OAK-D devices available for reinit")
+                return False
+            
+            # Create OAK-D pipeline
+            pipeline = dai.Pipeline()
+            
+            # Create color camera node
+            if hasattr(dai, "node") and hasattr(dai.node, "ColorCamera"):
+                camera = pipeline.create(dai.node.ColorCamera)
+            else:
+                camera = pipeline.createColorCamera()
+            
+            camera.setPreviewSize(config.CAMERA_WIDTH, config.CAMERA_HEIGHT)
+            camera.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+            camera.setInterleaved(False)
+            camera.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+            manual_control_fps = 30
+            camera.setFps(manual_control_fps)
+            
+            # Create XLinkOut for preview
+            if hasattr(dai, "node") and hasattr(dai.node, "XLinkOut"):
+                xout = pipeline.create(dai.node.XLinkOut)
+            else:
+                xout = pipeline.createXLinkOut()
+            xout.setStreamName("preview")
+            camera.preview.link(xout.input)
+            
+            # Start pipeline
+            self.oakd_device = dai.Device(pipeline)
+            self.oakd_queue = self.oakd_device.getOutputQueue("preview", maxSize=4, blocking=False)
+            
+            # Test capture
+            time.sleep(0.5)
+            frame_data = self.oakd_queue.tryGet()
+            if frame_data is not None:
+                frame = frame_data.getCvFrame()
+                if frame is not None:
+                    self.camera_type = 'oakd'
+                    print("[Camera] OAK-D camera reinitialized successfully")
+                    return True
+            
+            # If test failed, close device
+            self.oakd_device.close()
+            self.oakd_device = None
+            self.oakd_queue = None
+            return False
+            
+        except Exception as e:
+            print(f"[Camera] OAK-D reinit failed: {e}")
+            if self.oakd_device:
+                try:
+                    self.oakd_device.close()
+                except:
+                    pass
+                self.oakd_device = None
+                self.oakd_queue = None
+            return False
+    
     def capture_image(self) -> Optional[bytes]:
         """Capture image from camera as JPEG bytes."""
-        if not self.camera or not CAMERA_OK:
-            return None
+        frame = None
         
-        ret, frame = self.camera.read()
-        if not ret:
+        # Capture from OAK-D if available
+        if self.camera_type == 'oakd' and self.oakd_queue is not None:
+            try:
+                # Get the latest frame (drop old ones if queue has multiple)
+                frame_data = None
+                while True:
+                    new_frame = self.oakd_queue.tryGet()
+                    if new_frame is None:
+                        break
+                    frame_data = new_frame  # Keep the latest frame
+                
+                if frame_data is not None:
+                    frame = frame_data.getCvFrame()
+                    self.oakd_error_count = 0  # Reset error count on success
+            except Exception as e:
+                error_str = str(e)
+                # Check if it's an X_LINK_ERROR (communication error)
+                if 'X_LINK_ERROR' in error_str or 'Communication exception' in error_str:
+                    self.oakd_error_count += 1
+                    if self.oakd_error_count >= 3:  # After 3 consecutive errors, try to reinit
+                        print(f"[Camera] OAK-D communication error detected, attempting recovery...")
+                        if self._reinit_oakd():
+                            self.oakd_error_count = 0
+                            # Try to capture again after reinit
+                            try:
+                                frame_data = self.oakd_queue.tryGet()
+                                if frame_data is not None:
+                                    frame = frame_data.getCvFrame()
+                            except:
+                                pass
+                        else:
+                            print(f"[Camera] OAK-D reinitialization failed")
+                    else:
+                        print(f"[Camera] OAK-D capture error ({self.oakd_error_count}/3): {error_str[:100]}")
+                else:
+                    print(f"[Camera] OAK-D capture error: {error_str[:100]}")
+                return None
+        
+        # Capture from USB camera if OAK-D not available
+        elif self.camera_type == 'usb' and self.camera and CAMERA_OK:
+            ret, frame = self.camera.read()
+            if not ret:
+                return None
+        
+        if frame is None:
             return None
         
         # Encode as JPEG
@@ -258,8 +483,10 @@ class RobotServer:
     
     def get_cached_image(self) -> Optional[bytes]:
         """Get last captured image (for efficiency)."""
-        # Cache images for 0.1 seconds to avoid re-capturing for multiple requests
-        if self.last_image and (time.time() - self.last_image_time) < 0.1:
+        # For OAK-D, always get fresh frame for better FPS (cache only 0.02s = 50 FPS max)
+        # For USB camera, cache longer to reduce load
+        cache_time = 0.02 if self.camera_type == 'oakd' else 0.1
+        if self.last_image and (time.time() - self.last_image_time) < cache_time:
             return self.last_image
         return self.capture_image()
     
@@ -390,6 +617,14 @@ class RobotServer:
         if self.camera:
             self.camera.release()
         
+        if self.oakd_device:
+            try:
+                self.oakd_device.close()
+            except:
+                pass
+            self.oakd_device = None
+            self.oakd_queue = None
+        
         if hasattr(self, 'pyaudio') and self.pyaudio:
             self.pyaudio.terminate()
         
@@ -442,7 +677,79 @@ AUDIO_STATE = {
 # Map app volume 0-100% to hardware 0-125 (85% of max 147)
 # This prevents overdrive/clipping at max volume
 HW_VOLUME_MAX = 125  # 85% of 147
-HW_CARD = 3  # USB Audio card
+
+def detect_audio_card() -> Optional[int]:
+    """Auto-detect USB audio card with PCM control.
+    
+    Returns:
+        Card number (0-31) if found, None otherwise
+    """
+    try:
+        # First, try to list all cards
+        result = subprocess.run(
+            ['aplay', '-l'],
+            capture_output=True,
+            text=True,
+            timeout=3
+        )
+        if result.returncode != 0:
+            return None
+        
+        # Parse output to find USB audio devices
+        usb_cards = []
+        for line in result.stdout.split('\n'):
+            if 'card' in line and 'USB Audio' in line:
+                # Exclude camera audio devices
+                if 'Camera' not in line:
+                    parts = line.split()
+                    for i, part in enumerate(parts):
+                        if part == 'card' and i + 1 < len(parts):
+                            try:
+                                card_num = int(parts[i + 1].rstrip(':'))
+                                usb_cards.append(card_num)
+                            except ValueError:
+                                continue
+        
+        # Test each USB card to see if it has PCM control
+        for card_num in usb_cards:
+            try:
+                test_result = subprocess.run(
+                    ['amixer', '-c', str(card_num), 'sget', 'PCM'],
+                    capture_output=True,
+                    text=True,
+                    timeout=2
+                )
+                if test_result.returncode == 0 and 'Playback' in test_result.stdout:
+                    print(f"[Volume] Auto-detected USB audio card: {card_num}")
+                    return card_num
+            except Exception:
+                continue
+        
+        # Fallback: try cards 0-7 for PCM control
+        for card_num in range(8):
+            try:
+                test_result = subprocess.run(
+                    ['amixer', '-c', str(card_num), 'sget', 'PCM'],
+                    capture_output=True,
+                    text=True,
+                    timeout=2
+                )
+                if test_result.returncode == 0 and 'Playback' in test_result.stdout:
+                    print(f"[Volume] Auto-detected audio card with PCM: {card_num}")
+                    return card_num
+            except Exception:
+                continue
+        
+        return None
+    except Exception as e:
+        print(f"[Volume] Error detecting audio card: {e}")
+        return None
+
+# Auto-detect audio card on startup
+HW_CARD = detect_audio_card()
+if HW_CARD is None:
+    print("[Volume] ⚠️  Could not detect audio card, volume control may not work")
+    HW_CARD = 2  # Fallback to card 2 (common USB audio)
 
 def hash_token(token: str) -> str:
     """Hash a token for secure storage."""
@@ -511,34 +818,46 @@ async def get_status():
 
 @app.get("/shot")
 async def get_shot():
-    """Get single camera frame."""
+    """Get single camera frame - uses OAK-D for manual control."""
     robot = get_robot()
     
-    if not robot.camera:
-        raise HTTPException(status_code=503, detail="Camera not available")
+    # Manual control requires OAK-D camera
+    if robot.camera_type != 'oakd' or robot.oakd_queue is None:
+        raise HTTPException(status_code=503, detail="OAK-D camera required for manual control")
     
     image_bytes = robot.capture_image()
     if not image_bytes:
-        raise HTTPException(status_code=500, detail="Failed to capture image")
+        raise HTTPException(status_code=500, detail="Failed to capture image from OAK-D")
     
     return Response(content=image_bytes, media_type="image/jpeg")
 
 
 @app.get("/video")
 async def video_stream():
-    """MJPEG video stream."""
+    """MJPEG video stream - uses OAK-D for manual control."""
     robot = get_robot()
     
-    if not robot.camera:
-        raise HTTPException(status_code=503, detail="Camera not available")
+    # Manual control requires OAK-D camera
+    if robot.camera_type != 'oakd' or robot.oakd_queue is None:
+        raise HTTPException(status_code=503, detail="OAK-D camera required for manual control")
+    
+    # Use 30 FPS for manual control
+    manual_fps = 30
+    frame_interval = 1.0 / manual_fps
     
     def generate_frames():
         while True:
+            start_time = time.time()
             image_bytes = robot.capture_image()
             if image_bytes:
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + image_bytes + b'\r\n')
-            time.sleep(1.0 / config.CAMERA_FPS)
+            
+            # Sleep only the remaining time to maintain target FPS
+            elapsed = time.time() - start_time
+            sleep_time = max(0, frame_interval - elapsed)
+            if sleep_time > 0:
+                time.sleep(sleep_time)
     
     return StreamingResponse(
         generate_frames(),
@@ -548,25 +867,36 @@ async def video_stream():
 
 @app.websocket("/camera/ws")
 async def camera_websocket(websocket: WebSocket):
-    """WebSocket camera stream (base64 JPEG)."""
+    """WebSocket camera stream (base64 JPEG) - uses OAK-D for manual control."""
     robot = get_robot()
     
-    if not robot.camera:
-        await websocket.close(code=1011, reason="Camera not available")
+    # Manual control requires OAK-D camera
+    if robot.camera_type != 'oakd' or robot.oakd_queue is None:
+        await websocket.close(code=1011, reason="OAK-D camera required for manual control")
         return
     
     await websocket.accept()
-    print("[API] Camera WebSocket connected")
+    print("[API] Camera WebSocket connected (OAK-D)")
+    
+    # Use 30 FPS for manual control (OAK-D can handle it)
+    manual_fps = 30
+    frame_interval = 1.0 / manual_fps
     
     try:
         while True:
+            start_time = time.time()
             image_bytes = robot.get_cached_image()
             if image_bytes:
                 await websocket.send_json({
                     "frame": base64.b64encode(image_bytes).decode('utf-8'),
                     "timestamp": time.time()
                 })
-            await asyncio.sleep(1.0 / config.CAMERA_FPS)
+            
+            # Sleep only the remaining time to maintain target FPS
+            elapsed = time.time() - start_time
+            sleep_time = max(0, frame_interval - elapsed)
+            if sleep_time > 0:
+                await asyncio.sleep(sleep_time)
     except WebSocketDisconnect:
         print("[API] Camera WebSocket disconnected")
 
@@ -1128,25 +1458,32 @@ async def claim_control() -> ClaimControlResponse:
 @app.get("/control/volume")
 async def get_volume():
     """Get current speaker volume."""
+    global HW_CARD
+    # Re-detect card in case it changed
+    if HW_CARD is None:
+        HW_CARD = detect_audio_card()
+    
     # Try to read hardware volume and map back to 0-100 scale
-    try:
-        result = subprocess.run(
-            ['amixer', '-c', str(HW_CARD), 'get', 'PCM'],
-            capture_output=True,
-            text=True,
-            timeout=2
-        )
-        # Parse output to get hardware volume (0-147)
-        import re
-        match = re.search(r'Playback (\d+) \[(\d+)%\]', result.stdout)
-        if match:
-            hw_value = int(match.group(1))
-            # Map 0-125 to 0-100 (since 125 is our max)
-            volume = int((hw_value / HW_VOLUME_MAX) * 100)
-            volume = max(0, min(100, volume))  # Clamp to 0-100
-            AUDIO_STATE["volume"] = volume
-    except Exception as e:
-        print(f"[Volume] Could not read hardware volume: {e}")
+    if HW_CARD is not None:
+        try:
+            result = subprocess.run(
+                ['amixer', '-c', str(HW_CARD), 'get', 'PCM'],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if result.returncode == 0:
+                # Parse output to get hardware volume (0-147)
+                import re
+                match = re.search(r'Playback (\d+) \[(\d+)%\]', result.stdout)
+                if match:
+                    hw_value = int(match.group(1))
+                    # Map 0-125 to 0-100 (since 125 is our max)
+                    volume = int((hw_value / HW_VOLUME_MAX) * 100)
+                    volume = max(0, min(100, volume))  # Clamp to 0-100
+                    AUDIO_STATE["volume"] = volume
+        except Exception as e:
+            print(f"[Volume] Could not read hardware volume: {e}")
     
     return {
         "volume": AUDIO_STATE["volume"],
@@ -1158,23 +1495,53 @@ async def get_volume():
 @app.post("/control/volume")
 async def set_volume(command: VolumeCommand):
     """Set speaker volume (0-100)."""
+    global HW_CARD
+    # Re-detect card in case it changed
+    if HW_CARD is None:
+        HW_CARD = detect_audio_card()
+    
     # Clamp volume to valid range
     volume = max(0, min(100, command.volume))
     AUDIO_STATE["volume"] = volume
     
     # Set hardware mixer volume with safe mapping
     # Map 0-100% to 0-125 (prevents overdrive at max volume)
-    try:
-        hw_volume = int((volume / 100.0) * HW_VOLUME_MAX)
-        subprocess.run(
-            ['amixer', '-c', str(HW_CARD), 'sset', 'PCM', str(hw_volume)],
-            capture_output=True,
-            timeout=2
-        )
-        hw_percent = int((hw_volume / 147.0) * 100)
-        print(f"[Volume] Set to {volume}% (hardware: {hw_volume}/147 = {hw_percent}%)")
-    except Exception as e:
-        print(f"[Volume] Set software volume to {volume}% (hardware control unavailable)")
+    if HW_CARD is not None:
+        try:
+            hw_volume = int((volume / 100.0) * HW_VOLUME_MAX)
+            result = subprocess.run(
+                ['amixer', '-c', str(HW_CARD), 'sset', 'PCM', str(hw_volume)],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if result.returncode == 0:
+                hw_percent = int((hw_volume / 147.0) * 100)
+                print(f"[Volume] Set to {volume}% (hardware: {hw_volume}/147 = {hw_percent}% on card {HW_CARD})")
+            else:
+                print(f"[Volume] Failed to set hardware volume: {result.stderr}")
+                # Try to re-detect card
+                HW_CARD = detect_audio_card()
+                if HW_CARD is not None:
+                    # Retry once
+                    try:
+                        result = subprocess.run(
+                            ['amixer', '-c', str(HW_CARD), 'sset', 'PCM', str(hw_volume)],
+                            capture_output=True,
+                            text=True,
+                            timeout=2
+                        )
+                        if result.returncode == 0:
+                            hw_percent = int((hw_volume / 147.0) * 100)
+                            print(f"[Volume] Set to {volume}% (hardware: {hw_volume}/147 = {hw_percent}% on card {HW_CARD})")
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"[Volume] Set software volume to {volume}% (hardware control unavailable: {e})")
+            # Try to re-detect card for next time
+            HW_CARD = detect_audio_card()
+    else:
+        print(f"[Volume] Set software volume to {volume}% (no audio card detected)")
     
     return {
         "volume": volume,
@@ -1216,17 +1583,32 @@ async def run_robot_server():
         robot_server.cleanup()
 
 
+# Global uvicorn server instance for signal handler
+uvicorn_server = None
+
 def signal_handler(sig, frame):
     """Handle shutdown signals."""
     print("\n[Signal] Shutting down...")
+    
+    # Shutdown uvicorn gracefully
+    if uvicorn_server:
+        uvicorn_server.should_exit = True
+    
+    # Cleanup robot server
     if robot_server:
         robot_server.running = False
         robot_server.cleanup()
+    
+    # Give uvicorn a moment to shut down, then exit
+    import time
+    time.sleep(0.5)
     sys.exit(0)
 
 
 def main():
     """Main entry point."""
+    global uvicorn_server
+    
     if not FASTAPI_OK:
         print("ERROR: FastAPI not installed. Run: pip install fastapi uvicorn")
         return
@@ -1250,7 +1632,7 @@ def main():
         loop="asyncio"
     )
     
-    server = uvicorn.Server(config_uvicorn)
+    uvicorn_server = uvicorn.Server(config_uvicorn)
     
     # Add robot server startup to uvicorn lifespan
     async def startup():
@@ -1259,7 +1641,7 @@ def main():
     app.add_event_handler("startup", startup)
     
     # Run server
-    server.run()
+    uvicorn_server.run()
 
 
 if __name__ == "__main__":
