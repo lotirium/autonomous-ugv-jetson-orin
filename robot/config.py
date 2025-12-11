@@ -11,6 +11,7 @@ import os
 # Your PC's Tailscale IP
 PC_SERVER_IP = os.getenv("ROVY_PC_IP", "100.121.110.125")
 WS_PORT = 8765
+API_PORT = 8000  # Cloud server's HTTP API port
 
 # WebSocket URL
 SERVER_URL = f"ws://{PC_SERVER_IP}:{WS_PORT}"
@@ -42,6 +43,42 @@ SAMPLE_RATE = 16000
 CHANNELS = 1
 CHUNK_SIZE = 1024
 AUDIO_BUFFER_SECONDS = 2.0
+
+# =============================================================================
+# Wake Word Detection (Local on Pi)
+# =============================================================================
+
+# Wake words to listen for (case-insensitive)
+WAKE_WORDS = ["hey rovy", "rovy", "hey robot", "hey"]
+
+# VAD (Voice Activity Detection) settings
+VAD_SAMPLE_RATE = 16000
+VAD_THRESHOLD = 0.15  # Confidence threshold for speech detection (0.0-1.0) - lowered for far distance detection
+VAD_MIN_SPEECH_DURATION = 0.4  # Minimum speech duration in seconds (reduced to catch shorter utterances)
+VAD_MIN_SILENCE_DURATION = 0.6  # Minimum silence after speech in seconds
+
+# Whisper settings for local wake word detection
+WHISPER_MODEL = "tiny"  # tiny, base, small (tiny is fastest for Pi)
+WHISPER_DEVICE = "cpu"  # Use CPU on Pi
+WHISPER_COMPUTE_TYPE = "int8"  # int8 for CPU efficiency
+
+# Audio recording after wake word detected
+QUERY_RECORD_DURATION = 5.0  # Record 5 seconds after wake word for full query
+QUERY_TIMEOUT = 10.0  # Max time to wait for query after wake word
+
+# USB Microphone settings (card 4, device 0 - USB Headphone Set microphone)
+USB_MIC_SAMPLE_RATE = 44100  # Native sample rate of USB mic (will resample to 16kHz for VAD/Whisper)
+USB_MIC_DEVICE = "plughw:4,0"  # ALSA device for microphone input
+
+# =============================================================================
+# Audio Output (Speaker)
+# =============================================================================
+
+# USB Speaker device for audio playback (HK-5008)
+# Card 2 - UACDemoV1.0 (Jieli Technology)
+SPEAKER_DEVICE = "plughw:2,0"  # ALSA device for speaker
+SPEAKER_CARD = 2  # Card number for amixer volume control
+SPEAKER_DEFAULT_VOLUME = 80  # Default volume % (80% prevents clipping at high volumes)
 
 # =============================================================================
 # Text-to-Speech (Piper)

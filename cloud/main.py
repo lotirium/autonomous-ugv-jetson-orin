@@ -210,6 +210,13 @@ class RobotConnection:
             await self.send_speak(websocket, "Starting exploration mode.")
             return
         
+        # Check for "come to me" / "come here" commands
+        if ('come' in query_lower) and ('to me' in query_lower or 'here' in query_lower or 'to you' in query_lower):
+            logger.info(f"🧍 Come to me command detected: '{query}'")
+            await self.send_navigation(websocket, action='come_to_me')
+            await self.send_speak(websocket, "I'm coming to you! Looking for you now...")
+            return
+        
         # Check for stop exploring command (explore start is handled by tool system)
         if ('stop' in query_lower and 'explor' in query_lower) or ('stop explor' in query_lower):
             logger.info(f"🛑 Stop explore command detected: '{query}'")
