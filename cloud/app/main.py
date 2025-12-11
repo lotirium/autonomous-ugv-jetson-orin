@@ -1677,14 +1677,22 @@ async def trigger_dance(request: dict):
         raise HTTPException(status_code=501, detail="Dance function not supported by this rover")
     
     try:
-        # If music requested, start it first
+        # If music requested, start it first by sending API call to robot
         if with_music:
             try:
-                from robot.music_player import get_music_player
-                music_player = get_music_player()
-                if music_player and music_player.yt_music:
-                    await anyio.to_thread.run_sync(music_player.play_random, music_genre)
-                    await anyio.sleep(2)  # Let music start
+                import httpx
+                pi_ip = os.getenv("ROVY_ROBOT_IP", "100.72.107.106")
+                music_url = f"http://{pi_ip}:8000/music"
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    music_response = await client.post(
+                        music_url,
+                        json={"action": "play", "genre": music_genre}
+                    )
+                    if music_response.status_code == 200:
+                        LOGGER.info(f"🎵 Music started: {music_genre}")
+                        await anyio.sleep(2)  # Let music start
+                    else:
+                        LOGGER.warning(f"Music failed with status {music_response.status_code}")
             except Exception as music_error:
                 LOGGER.warning(f"Music failed, dancing without: {music_error}")
         
@@ -1694,12 +1702,14 @@ async def trigger_dance(request: dict):
         # Stop music after dance if it was started
         if with_music:
             try:
-                from robot.music_player import get_music_player
-                music_player = get_music_player()
-                if music_player and music_player.is_playing:
-                    music_player.stop()
-            except:
-                pass
+                import httpx
+                pi_ip = os.getenv("ROVY_ROBOT_IP", "100.72.107.106")
+                music_url = f"http://{pi_ip}:8000/music"
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    await client.post(music_url, json={"action": "stop"})
+                    LOGGER.info("🎵 Music stopped after dance")
+            except Exception as stop_error:
+                LOGGER.warning(f"Failed to stop music: {stop_error}")
         
         return {
             "status": "ok",
@@ -1739,44 +1749,34 @@ async def control_music(request: dict):
         raise HTTPException(status_code=400, detail=f"Invalid genre. Must be one of: {valid_genres}")
     
     try:
-        from robot.music_player import get_music_player
-        music_player = get_music_player()
+        # Forward music control request to robot's API
+        import httpx
+        pi_ip = os.getenv("ROVY_ROBOT_IP", "100.72.107.106")
+        music_url = f"http://{pi_ip}:8000/music"
         
-        if not music_player or not music_player.yt_music:
-            raise HTTPException(status_code=503, detail="YouTube Music not configured. Run auth_youtube.py on the robot.")
-        
-        if action == 'play':
-            LOGGER.info(f"🎵 Playing {genre} music")
-            success = await anyio.to_thread.run_sync(music_player.play_random, genre)
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            music_response = await client.post(
+                music_url,
+                json={"action": action, "genre": genre}
+            )
             
-            if success:
-                return {
-                    "status": "ok",
-                    "action": "playing",
-                    "genre": genre,
-                    "current_song": music_player.current_song
-                }
+            if music_response.status_code == 200:
+                result = music_response.json()
+                if action == 'play':
+                    LOGGER.info(f"🎵 Playing {genre} music via robot")
+                elif action == 'stop':
+                    LOGGER.info("⏹️ Stopping music via robot")
+                return result
             else:
-                raise HTTPException(status_code=404, detail=f"No {genre} songs found")
-        
-        elif action == 'stop':
-            LOGGER.info("⏹️ Stopping music")
-            music_player.stop()
-            return {
-                "status": "ok",
-                "action": "stopped"
-            }
-        
-        elif action == 'status':
-            status = music_player.get_status()
-            return {
-                "status": "ok",
-                "is_playing": status['is_playing'],
-                "current_song": status['current_song']
-            }
+                error_detail = music_response.text
+                raise HTTPException(
+                    status_code=music_response.status_code,
+                    detail=f"Robot music control failed: {error_detail}"
+                )
     
-    except ImportError:
-        raise HTTPException(status_code=503, detail="Music player module not available")
+    except httpx.RequestError as exc:
+        LOGGER.error(f"Failed to connect to robot: {exc}", exc_info=True)
+        raise HTTPException(status_code=503, detail="Cannot connect to robot")
     except Exception as exc:
         LOGGER.error(f"Music control failed: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Music control failed: {str(exc)}")
