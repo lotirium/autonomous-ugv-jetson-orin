@@ -54,3 +54,6 @@ api/
 # Piper TTS voice models (download separately)
 models/piper/*.onnx
 models/piper/*.json
+
+# Secrets and credentials
+robot/client_secrets.json

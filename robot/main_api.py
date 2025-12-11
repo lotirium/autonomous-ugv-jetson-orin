@@ -2311,8 +2311,19 @@ async def control_music(action: str, request: dict = None):
                 
                 # Stop any existing playback first
                 if music_player_process and music_player_process.poll() is None:
-                    music_player_process.terminate()
-                    music_player_process.wait(timeout=2)
+                    import os
+                    import signal
+                    try:
+                        os.killpg(os.getpgid(music_player_process.pid), signal.SIGTERM)
+                    except:
+                        music_player_process.terminate()
+                    try:
+                        music_player_process.wait(timeout=2)
+                    except:
+                        try:
+                            os.killpg(os.getpgid(music_player_process.pid), signal.SIGKILL)
+                        except:
+                            music_player_process.kill()
                 
                 # Determine search query
                 if query:
@@ -2344,11 +2355,13 @@ async def control_music(action: str, request: dict = None):
                     
                     # Play the audio URL with ffmpeg to speaker device
                     # Use ffmpeg to decode and aplay to output to correct device
+                    # Create new process group so we can kill all child processes
                     music_player_process = subprocess.Popen(
                         f'ffmpeg -i "{audio_url}" -f wav -ac 2 -ar 44100 - 2>/dev/null | aplay -D {config.SPEAKER_DEVICE} -',
                         shell=True,
                         stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
+                        stderr=subprocess.DEVNULL,
+                        preexec_fn=os.setsid  # Create new process group
                     )
                     
                     print(f"[Music] ✅ Playing: {search_term}")
@@ -2368,8 +2381,22 @@ async def control_music(action: str, request: dict = None):
             
             elif action == "stop":
                 if music_player_process and music_player_process.poll() is None:
-                    music_player_process.terminate()
-                    music_player_process.wait(timeout=2)
+                    import os
+                    import signal
+                    # Kill the entire process group to stop all child processes (ffmpeg, aplay, etc.)
+                    try:
+                        os.killpg(os.getpgid(music_player_process.pid), signal.SIGTERM)
+                    except:
+                        # Fallback to regular terminate if process group kill fails
+                        music_player_process.terminate()
+                    try:
+                        music_player_process.wait(timeout=2)
+                    except:
+                        # Force kill if it doesn't stop
+                        try:
+                            os.killpg(os.getpgid(music_player_process.pid), signal.SIGKILL)
+                        except:
+                            music_player_process.kill()
                     music_paused = False
                     print(f"[Music] ✅ Stopped")
                 else:
@@ -2384,8 +2411,19 @@ async def control_music(action: str, request: dict = None):
                 
                 # Stop current playback
                 if music_player_process and music_player_process.poll() is None:
-                    music_player_process.terminate()
-                    music_player_process.wait(timeout=2)
+                    import os
+                    import signal
+                    try:
+                        os.killpg(os.getpgid(music_player_process.pid), signal.SIGTERM)
+                    except:
+                        music_player_process.terminate()
+                    try:
+                        music_player_process.wait(timeout=2)
+                    except:
+                        try:
+                            os.killpg(os.getpgid(music_player_process.pid), signal.SIGKILL)
+                        except:
+                            music_player_process.kill()
                 
                 music_paused = False
                 music_track_index += 1  # Increment to get next track
@@ -2410,7 +2448,8 @@ async def control_music(action: str, request: dict = None):
                         f'ffmpeg -i "{audio_url}" -f wav -ac 2 -ar 44100 - 2>/dev/null | aplay -D {config.SPEAKER_DEVICE} -',
                         shell=True,
                         stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
+                        stderr=subprocess.DEVNULL,
+                        preexec_fn=os.setsid  # Create new process group
                     )
                     print(f"[Music] ✅ Next track playing")
                 else:
@@ -2425,8 +2464,19 @@ async def control_music(action: str, request: dict = None):
                 
                 # Stop current playback
                 if music_player_process and music_player_process.poll() is None:
-                    music_player_process.terminate()
-                    music_player_process.wait(timeout=2)
+                    import os
+                    import signal
+                    try:
+                        os.killpg(os.getpgid(music_player_process.pid), signal.SIGTERM)
+                    except:
+                        music_player_process.terminate()
+                    try:
+                        music_player_process.wait(timeout=2)
+                    except:
+                        try:
+                            os.killpg(os.getpgid(music_player_process.pid), signal.SIGKILL)
+                        except:
+                            music_player_process.kill()
                 
                 music_paused = False
                 music_track_index = max(0, music_track_index - 1)  # Decrement to get previous track
@@ -2450,7 +2500,8 @@ async def control_music(action: str, request: dict = None):
                         f'ffmpeg -i "{audio_url}" -f wav -ac 2 -ar 44100 - 2>/dev/null | aplay -D {config.SPEAKER_DEVICE} -',
                         shell=True,
                         stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
+                        stderr=subprocess.DEVNULL,
+                        preexec_fn=os.setsid  # Create new process group
                     )
                     print(f"[Music] ✅ Previous track playing")
                 else:
