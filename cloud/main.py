@@ -197,11 +197,30 @@ class RobotConnection:
         
         query_lower = query.lower().strip()
         
+        # Check for navigation commands
+        if ('start' in query_lower or 'begin' in query_lower) and ('auto' in query_lower or 'autonomous' in query_lower) and 'navigation' in query_lower:
+            logger.info(f"🤖 Auto navigation command detected: '{query}'")
+            await self.send_navigation(websocket, action='start_explore', duration=None)
+            await self.send_speak(websocket, "Starting autonomous navigation. I will explore and avoid obstacles.")
+            return
+        
+        if ('start' in query_lower or 'begin' in query_lower) and 'explore' in query_lower:
+            logger.info(f"🤖 Explore command detected: '{query}'")
+            await self.send_navigation(websocket, action='start_explore', duration=None)
+            await self.send_speak(websocket, "Starting exploration mode.")
+            return
+        
         # Check for stop exploring command (explore start is handled by tool system)
         if ('stop' in query_lower and 'explor' in query_lower) or ('stop explor' in query_lower):
             logger.info(f"🛑 Stop explore command detected: '{query}'")
             await self.stop_exploration()
             await self.send_speak(websocket, "Stopping exploration.")
+            return
+        
+        if ('stop' in query_lower or 'end' in query_lower) and 'navigation' in query_lower:
+            logger.info(f"🛑 Stop navigation command detected: '{query}'")
+            await self.send_navigation(websocket, action='stop')
+            await self.send_speak(websocket, "Stopping navigation.")
             return
         
         logger.info(f"🎯 Processing: '{query}'")
@@ -280,6 +299,18 @@ class RobotConnection:
         """Send gimbal command to robot."""
         msg = {"type": "gimbal", "pan": pan, "tilt": tilt, "action": "move"}
         await websocket.send(json.dumps(msg))
+    
+    async def send_navigation(self, websocket: WebSocketServerProtocol, action: str, duration: float = None, x: float = None, y: float = None):
+        """Send navigation command to robot."""
+        msg = {"type": "navigation", "action": action}
+        if duration is not None:
+            msg["duration"] = duration
+        if x is not None:
+            msg["x"] = x
+        if y is not None:
+            msg["y"] = y
+        await websocket.send(json.dumps(msg))
+        logger.info(f"🧭 Navigation: {action}")
     
     async def start_exploration(self, websocket: WebSocketServerProtocol):
         """Start exploration mode - uses camera to navigate autonomously."""
