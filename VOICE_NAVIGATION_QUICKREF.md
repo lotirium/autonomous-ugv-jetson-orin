@@ -19,12 +19,22 @@
 
 ## Voice Commands
 
+### Navigation Commands
 | Command | What It Does |
 |---------|-------------|
 | "Hey Rovy, **start auto navigation**" | Begin autonomous exploration with obstacle avoidance |
 | "Hey Rovy, **start exploring**" | Same as above - starts exploration mode |
 | "Hey Rovy, **stop navigation**" | Stop autonomous navigation and return to manual control |
 | "Hey Rovy, **stop exploring**" | Stop exploration mode |
+
+### Fun Commands
+| Command | What It Does |
+|---------|-------------|
+| "Hey Rovy, **dance**" | Perform a party dance routine (10 seconds) |
+| "Hey Rovy, **do a wiggle dance**" | Perform side-to-side wiggle dance |
+| "Hey Rovy, **do a spin dance**" | Perform 360-degree spinning dance |
+| "Hey Rovy, **show me your moves**" | Perform a dance (same as "dance") |
+| "Hey Rovy, **bust a move**" | Perform a dance (same as "dance") |
 
 ## What Happens
 

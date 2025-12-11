@@ -223,6 +223,69 @@ class RobotConnection:
             await self.send_speak(websocket, "Stopping navigation.")
             return
         
+        # Check for dance command
+        if 'dance' in query_lower or 'bust a move' in query_lower or 'show me your moves' in query_lower:
+            logger.info(f"💃 Dance command detected: '{query}'")
+            
+            # Extract dance style if mentioned
+            style = 'party'  # default
+            if 'wiggle' in query_lower:
+                style = 'wiggle'
+            elif 'spin' in query_lower:
+                style = 'spin'
+            elif 'party' in query_lower:
+                style = 'party'
+            
+            # Check if music should be included (default: yes for dance commands)
+            with_music = True
+            music_genre = 'dance'
+            
+            # Extract music genre if specified
+            if 'classical' in query_lower:
+                music_genre = 'classical'
+            elif 'jazz' in query_lower:
+                music_genre = 'jazz'
+            elif 'rock' in query_lower:
+                music_genre = 'rock'
+            elif 'electronic' in query_lower or 'edm' in query_lower:
+                music_genre = 'electronic'
+            
+            await self.send_dance(websocket, style=style, duration=10, with_music=with_music, music_genre=music_genre)
+            await self.send_speak(websocket, f"Let me show you my {style} dance moves with {music_genre} music!")
+            return
+        
+        # Check for music command (without dancing)
+        if 'play music' in query_lower or 'play some music' in query_lower:
+            logger.info(f"🎵 Music command detected: '{query}'")
+            
+            # Extract genre
+            genre = 'fun'  # default for general music requests
+            if 'classical' in query_lower:
+                genre = 'classical'
+            elif 'jazz' in query_lower:
+                genre = 'jazz'
+            elif 'rock' in query_lower:
+                genre = 'rock'
+            elif 'pop' in query_lower:
+                genre = 'pop'
+            elif 'dance' in query_lower or 'party' in query_lower:
+                genre = 'dance'
+            elif 'chill' in query_lower or 'relax' in query_lower:
+                genre = 'chill'
+            elif 'electronic' in query_lower or 'edm' in query_lower:
+                genre = 'electronic'
+            
+            await self.send_music(websocket, action='play', genre=genre)
+            await self.send_speak(websocket, f"Playing {genre} music for you!")
+            return
+        
+        # Check for stop music command
+        if ('stop' in query_lower or 'pause' in query_lower) and 'music' in query_lower:
+            logger.info(f"⏹️ Stop music command detected: '{query}'")
+            await self.send_music(websocket, action='stop')
+            await self.send_speak(websocket, "Stopping music.")
+            return
+        
         logger.info(f"🎯 Processing: '{query}'")
         
         # Auto-detect vision need
@@ -311,6 +374,25 @@ class RobotConnection:
             msg["y"] = y
         await websocket.send(json.dumps(msg))
         logger.info(f"🧭 Navigation: {action}")
+    
+    async def send_dance(self, websocket: WebSocketServerProtocol, style: str = 'party', duration: float = 10, 
+                        with_music: bool = False, music_genre: str = 'dance'):
+        """Send dance command to robot."""
+        msg = {
+            "type": "dance", 
+            "style": style, 
+            "duration": duration,
+            "with_music": with_music,
+            "music_genre": music_genre
+        }
+        await websocket.send(json.dumps(msg))
+        logger.info(f"💃 Dance: {style} for {duration}s" + (f" with {music_genre} music" if with_music else ""))
+    
+    async def send_music(self, websocket: WebSocketServerProtocol, action: str = 'play', genre: str = 'dance'):
+        """Send music command to robot."""
+        msg = {"type": "music", "action": action, "genre": genre}
+        await websocket.send(json.dumps(msg))
+        logger.info(f"🎵 Music: {action}" + (f" ({genre})" if action == 'play' else ""))
     
     async def start_exploration(self, websocket: WebSocketServerProtocol):
         """Start exploration mode - uses camera to navigate autonomously."""

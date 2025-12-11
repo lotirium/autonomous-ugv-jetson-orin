@@ -1075,6 +1075,121 @@ async def voice_websocket(websocket: WebSocket):
                                     except Exception as nav_error:
                                         LOGGER.error(f"Stop navigation command failed: {nav_error}")
                                 
+                                # Dance commands
+                                if 'dance' in transcript_lower or 'bust a move' in transcript_lower or 'show me your moves' in transcript_lower:
+                                    LOGGER.info(f"💃 Dance command detected: '{transcript}'")
+                                    try:
+                                        # Extract dance style
+                                        style = 'party'
+                                        if 'wiggle' in transcript_lower:
+                                            style = 'wiggle'
+                                        elif 'spin' in transcript_lower:
+                                            style = 'spin'
+                                        
+                                        # Extract music genre (default: dance)
+                                        music_genre = 'dance'
+                                        if 'classical' in transcript_lower:
+                                            music_genre = 'classical'
+                                        elif 'jazz' in transcript_lower:
+                                            music_genre = 'jazz'
+                                        elif 'rock' in transcript_lower:
+                                            music_genre = 'rock'
+                                        elif 'electronic' in transcript_lower or 'edm' in transcript_lower:
+                                            music_genre = 'electronic'
+                                        
+                                        pi_ip = os.getenv("ROVY_ROBOT_IP", "100.72.107.106")
+                                        dance_url = f"http://{pi_ip}:8000/dance"
+                                        async with httpx.AsyncClient(timeout=5.0) as client:
+                                            dance_response = await client.post(
+                                                dance_url,
+                                                json={
+                                                    "style": style, 
+                                                    "duration": 10, 
+                                                    "with_music": True,
+                                                    "music_genre": music_genre
+                                                }
+                                            )
+                                            if dance_response.status_code == 200:
+                                                response_text = f"Let me show you my {style} dance moves with {music_genre} music!"
+                                                await websocket.send_json({
+                                                    "type": "response",
+                                                    "text": response_text
+                                                })
+                                                # Send TTS
+                                                pi_url = f"http://{pi_ip}:8000/speak"
+                                                async with httpx.AsyncClient(timeout=10.0) as tts_client:
+                                                    await tts_client.post(pi_url, json={"text": response_text})
+                                                continue
+                                    except Exception as dance_error:
+                                        LOGGER.error(f"Dance command failed: {dance_error}")
+                                
+                                # Music commands
+                                if 'play music' in transcript_lower or 'play some music' in transcript_lower:
+                                    LOGGER.info(f"🎵 Music command detected: '{transcript}'")
+                                    try:
+                                        # Extract genre
+                                        genre = 'fun'
+                                        if 'classical' in transcript_lower:
+                                            genre = 'classical'
+                                        elif 'jazz' in transcript_lower:
+                                            genre = 'jazz'
+                                        elif 'rock' in transcript_lower:
+                                            genre = 'rock'
+                                        elif 'pop' in transcript_lower:
+                                            genre = 'pop'
+                                        elif 'dance' in transcript_lower or 'party' in transcript_lower:
+                                            genre = 'dance'
+                                        elif 'chill' in transcript_lower or 'relax' in transcript_lower:
+                                            genre = 'chill'
+                                        elif 'electronic' in transcript_lower or 'edm' in transcript_lower:
+                                            genre = 'electronic'
+                                        
+                                        pi_ip = os.getenv("ROVY_ROBOT_IP", "100.72.107.106")
+                                        music_url = f"http://{pi_ip}:8000/music"
+                                        async with httpx.AsyncClient(timeout=5.0) as client:
+                                            music_response = await client.post(
+                                                music_url,
+                                                json={"action": "play", "genre": genre}
+                                            )
+                                            if music_response.status_code == 200:
+                                                response_text = f"Playing {genre} music for you!"
+                                                await websocket.send_json({
+                                                    "type": "response",
+                                                    "text": response_text
+                                                })
+                                                # Send TTS
+                                                pi_url = f"http://{pi_ip}:8000/speak"
+                                                async with httpx.AsyncClient(timeout=10.0) as tts_client:
+                                                    await tts_client.post(pi_url, json={"text": response_text})
+                                                continue
+                                    except Exception as music_error:
+                                        LOGGER.error(f"Music command failed: {music_error}")
+                                
+                                # Stop music commands
+                                if ('stop' in transcript_lower or 'pause' in transcript_lower) and 'music' in transcript_lower:
+                                    LOGGER.info(f"⏹️ Stop music command detected: '{transcript}'")
+                                    try:
+                                        pi_ip = os.getenv("ROVY_ROBOT_IP", "100.72.107.106")
+                                        music_url = f"http://{pi_ip}:8000/music"
+                                        async with httpx.AsyncClient(timeout=5.0) as client:
+                                            music_response = await client.post(
+                                                music_url,
+                                                json={"action": "stop"}
+                                            )
+                                            if music_response.status_code == 200:
+                                                response_text = "Stopping music."
+                                                await websocket.send_json({
+                                                    "type": "response",
+                                                    "text": response_text
+                                                })
+                                                # Send TTS
+                                                pi_url = f"http://{pi_ip}:8000/speak"
+                                                async with httpx.AsyncClient(timeout=10.0) as tts_client:
+                                                    await tts_client.post(pi_url, json={"text": response_text})
+                                                continue
+                                    except Exception as music_error:
+                                        LOGGER.error(f"Stop music command failed: {music_error}")
+                                
                                 # Get AI response (with vision if asking about camera/image)
                                 assistant = _get_assistant()
                                 if assistant:
@@ -1520,6 +1635,151 @@ async def speak_text(request: dict):
         return {"status": "ok", "message": "Speech played"}
     else:
         raise HTTPException(status_code=503, detail="TTS not available")
+
+
+@app.post("/dance", tags=["Control"])
+async def trigger_dance(request: dict):
+    """Trigger a dance routine on the robot.
+    
+    Request body:
+        style: Dance style - 'party', 'wiggle', or 'spin' (optional, default: 'party')
+        duration: Duration in seconds (optional, default: 10)
+        with_music: Play music during dance (optional, default: False)
+        music_genre: Music genre if with_music is True (optional, default: 'dance')
+    
+    Can be called from:
+    - Mobile app directly
+    - Cloud server via voice commands
+    """
+    style = request.get("style", "party")
+    duration = request.get("duration", 10)
+    with_music = request.get("with_music", False)
+    music_genre = request.get("music_genre", "dance")
+    
+    # Validate style
+    valid_styles = ['party', 'wiggle', 'spin']
+    if style not in valid_styles:
+        raise HTTPException(status_code=400, detail=f"Invalid style. Must be one of: {valid_styles}")
+    
+    # Validate duration
+    if not isinstance(duration, (int, float)) or duration <= 0 or duration > 60:
+        raise HTTPException(status_code=400, detail="Duration must be between 0 and 60 seconds")
+    
+    LOGGER.info(f"💃 Dance triggered: {style} for {duration}s" + (f" with {music_genre} music" if with_music else ""))
+    
+    # Get the rover controller instance
+    base_controller = _get_base_controller()
+    
+    if not base_controller:
+        raise HTTPException(status_code=503, detail="Rover controller not available")
+    
+    if not hasattr(base_controller, "dance"):
+        raise HTTPException(status_code=501, detail="Dance function not supported by this rover")
+    
+    try:
+        # If music requested, start it first
+        if with_music:
+            try:
+                from robot.music_player import get_music_player
+                music_player = get_music_player()
+                if music_player and music_player.yt_music:
+                    await anyio.to_thread.run_sync(music_player.play_random, music_genre)
+                    await anyio.sleep(2)  # Let music start
+            except Exception as music_error:
+                LOGGER.warning(f"Music failed, dancing without: {music_error}")
+        
+        # Run dance in background thread to not block the response
+        await anyio.to_thread.run_sync(base_controller.dance, style, duration)
+        
+        # Stop music after dance if it was started
+        if with_music:
+            try:
+                from robot.music_player import get_music_player
+                music_player = get_music_player()
+                if music_player and music_player.is_playing:
+                    music_player.stop()
+            except:
+                pass
+        
+        return {
+            "status": "ok",
+            "message": f"Dancing {style} style for {duration} seconds" + (" with music" if with_music else ""),
+            "style": style,
+            "duration": duration,
+            "with_music": with_music,
+            "music_genre": music_genre if with_music else None
+        }
+    except Exception as exc:
+        LOGGER.error(f"Dance execution failed: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Dance failed: {str(exc)}")
+
+
+@app.post("/music", tags=["Control"])
+async def control_music(request: dict):
+    """Control music playback on the robot.
+    
+    Request body:
+        action: 'play' or 'stop' (required)
+        genre: Music genre for 'play' action (optional, default: 'dance')
+                Options: 'dance', 'party', 'classical', 'jazz', 'rock', 'pop', 'chill', 'electronic', 'fun'
+    
+    Returns:
+        Status and currently playing song info (if applicable)
+    """
+    action = request.get("action", "play")
+    genre = request.get("genre", "dance")
+    
+    # Validate action
+    if action not in ['play', 'stop', 'status']:
+        raise HTTPException(status_code=400, detail="Action must be 'play', 'stop', or 'status'")
+    
+    # Validate genre
+    valid_genres = ['dance', 'party', 'classical', 'jazz', 'rock', 'pop', 'chill', 'electronic', 'fun']
+    if action == 'play' and genre not in valid_genres:
+        raise HTTPException(status_code=400, detail=f"Invalid genre. Must be one of: {valid_genres}")
+    
+    try:
+        from robot.music_player import get_music_player
+        music_player = get_music_player()
+        
+        if not music_player or not music_player.yt_music:
+            raise HTTPException(status_code=503, detail="YouTube Music not configured. Run auth_youtube.py on the robot.")
+        
+        if action == 'play':
+            LOGGER.info(f"🎵 Playing {genre} music")
+            success = await anyio.to_thread.run_sync(music_player.play_random, genre)
+            
+            if success:
+                return {
+                    "status": "ok",
+                    "action": "playing",
+                    "genre": genre,
+                    "current_song": music_player.current_song
+                }
+            else:
+                raise HTTPException(status_code=404, detail=f"No {genre} songs found")
+        
+        elif action == 'stop':
+            LOGGER.info("⏹️ Stopping music")
+            music_player.stop()
+            return {
+                "status": "ok",
+                "action": "stopped"
+            }
+        
+        elif action == 'status':
+            status = music_player.get_status()
+            return {
+                "status": "ok",
+                "is_playing": status['is_playing'],
+                "current_song": status['current_song']
+            }
+    
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Music player module not available")
+    except Exception as exc:
+        LOGGER.error(f"Music control failed: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Music control failed: {str(exc)}")
 
 
 @app.post("/gesture/detect", tags=["AI"])

@@ -270,6 +270,12 @@ class RovyClient:
             elif msg_type == 'navigation':
                 await self.handle_navigation(msg)
             
+            elif msg_type == 'dance':
+                await self.handle_dance(msg)
+            
+            elif msg_type == 'music':
+                await self.handle_music(msg)
+            
             elif msg_type == 'pong':
                 pass  # Heartbeat response
             
@@ -491,6 +497,145 @@ class RovyClient:
                     traceback.print_exc()
             
             threading.Thread(target=navigate_to, daemon=True).start()
+    
+    async def handle_dance(self, msg):
+        """Handle dance command."""
+        if not self.rover:
+            print("[Dance] No rover instance available")
+            return
+        
+        style = msg.get('style', 'party')
+        duration = msg.get('duration', 10)
+        with_music = msg.get('with_music', False)
+        music_genre = msg.get('music_genre', 'dance')
+        
+        print(f"[Dance] 💃 Starting {style} dance for {duration}s!")
+        if with_music:
+            print(f"[Dance] 🎵 With {music_genre} music!")
+        
+        # Display on OLED
+        self.rover.display_lines([
+            "DANCE MODE" + (" 🎵" if with_music else ""),
+            f"Style: {style}",
+            f"Time: {duration}s",
+            "💃🕺💃"
+        ])
+        
+        # Run dance in separate thread
+        def do_dance():
+            try:
+                # Start music if requested
+                music_player = None
+                if with_music:
+                    try:
+                        from music_player import get_music_player
+                        music_player = get_music_player()
+                        
+                        if music_player and music_player.yt_music:
+                            print(f"[Dance] 🎵 Starting {music_genre} music...")
+                            music_player.play_random(music_genre)
+                            time.sleep(2)  # Let music start
+                        else:
+                            print("[Dance] ⚠️ Music player not available, dancing without music")
+                    except Exception as music_error:
+                        print(f"[Dance] ⚠️ Music error: {music_error}, dancing without music")
+                
+                # Perform dance
+                self.rover.dance(style=style, duration=duration)
+                
+                # Stop music after dance
+                if music_player and music_player.is_playing:
+                    print("[Dance] 🎵 Stopping music...")
+                    music_player.stop()
+                
+                # Reset display after dance
+                self.rover.display_lines([
+                    "ROVY",
+                    "Cloud Mode",
+                    "Ready",
+                    ""
+                ])
+            except Exception as e:
+                print(f"[Dance] Error: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        threading.Thread(target=do_dance, daemon=True).start()
+    
+    async def handle_music(self, msg):
+        """Handle music playback command."""
+        action = msg.get('action', 'play')
+        genre = msg.get('genre', 'dance')
+        
+        try:
+            from music_player import get_music_player
+            music_player = get_music_player()
+            
+            if not music_player or not music_player.yt_music:
+                print("[Music] ⚠️ YouTube Music not configured")
+                if self.rover:
+                    self.rover.display_lines([
+                        "Music Error",
+                        "YT Music",
+                        "Not Setup",
+                        ""
+                    ])
+                return
+            
+            if action == 'play':
+                print(f"[Music] 🎵 Playing {genre} music...")
+                
+                if self.rover:
+                    self.rover.display_lines([
+                        "MUSIC MODE",
+                        f"Genre: {genre}",
+                        "Loading...",
+                        "🎵"
+                    ])
+                
+                def play_music():
+                    success = music_player.play_random(genre)
+                    if success and self.rover:
+                        song = music_player.current_song
+                        if song:
+                            self.rover.display_lines([
+                                "NOW PLAYING",
+                                song['title'][:21],
+                                song['artist'][:21],
+                                "🎵"
+                            ])
+                    elif self.rover:
+                        self.rover.display_lines([
+                            "Music Error",
+                            "No songs found",
+                            f"Genre: {genre}",
+                            ""
+                        ])
+                
+                threading.Thread(target=play_music, daemon=True).start()
+            
+            elif action == 'stop':
+                print("[Music] ⏹️ Stopping music...")
+                music_player.stop()
+                
+                if self.rover:
+                    self.rover.display_lines([
+                        "MUSIC",
+                        "Stopped",
+                        "",
+                        ""
+                    ])
+            
+            elif action == 'status':
+                status = music_player.get_status()
+                print(f"[Music] Status: {status}")
+                
+        except ImportError:
+            print("[Music] ⚠️ music_player module not found")
+        except Exception as e:
+            print(f"[Music] Error: {e}")
+            import traceback
+            traceback.print_exc()
     
     def capture_image(self) -> bytes:
         """Capture image from camera as JPEG bytes."""
