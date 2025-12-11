@@ -7,6 +7,9 @@ Detects people and provides their spatial location (distance, angle) for navigat
 import depthai as dai
 import numpy as np
 import time
+import os
+import urllib.request
+from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 from dataclasses import dataclass
 
@@ -20,6 +23,28 @@ class PersonDetection:
     angle_vertical: float  # Vertical angle in degrees
     bbox: Tuple[float, float, float, float]  # Normalized bbox (x, y, w, h)
     spatial_coords: Tuple[float, float, float]  # X, Y, Z in meters
+
+
+def download_mobilenet_model():
+    """Download MobileNet-SSD model if not present"""
+    model_dir = Path.home() / ".cache" / "depthai" / "models"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    model_path = model_dir / "mobilenet-ssd_openvino_2021.4_6shave.blob"
+    
+    if model_path.exists():
+        print(f"[PersonDetector] Model found: {model_path}")
+        return str(model_path)
+    
+    print("[PersonDetector] Downloading MobileNet-SSD model...")
+    url = "https://artifacts.luxonis.com/artifactory/luxonis-depthai-data-local/network/mobilenet-ssd_openvino_2021.4_6shave.blob"
+    
+    try:
+        urllib.request.urlretrieve(url, model_path)
+        print(f"[PersonDetector] ✅ Model downloaded to {model_path}")
+        return str(model_path)
+    except Exception as e:
+        print(f"[PersonDetector] ❌ Failed to download model: {e}")
+        raise
 
 
 class PersonDetector:
@@ -45,6 +70,7 @@ class PersonDetector:
         self.detection_queue = None
         self.preview_queue = None
         self.is_running = False
+        self.model_path = None
         
         print(f"[PersonDetector] Initialized (confidence >= {confidence_threshold})")
     
@@ -57,6 +83,9 @@ class PersonDetector:
         print("[PersonDetector] Starting OAK-D person detection...")
         
         try:
+            # Download model if needed
+            self.model_path = download_mobilenet_model()
+            
             # Create pipeline
             pipeline = dai.Pipeline()
             
@@ -72,7 +101,7 @@ class PersonDetector:
             # Using MobileNet-SSD trained on COCO dataset (class 15 = person)
             detection_nn = pipeline.create(dai.node.MobileNetDetectionNetwork)
             detection_nn.setConfidenceThreshold(self.confidence_threshold)
-            detection_nn.setBlobPath("/usr/local/lib/python3.11/dist-packages/depthai/resources/nn/mobilenet-ssd/mobilenet-ssd.blob")
+            detection_nn.setBlobPath(self.model_path)
             cam.preview.link(detection_nn.input)
             
             # Create depth
@@ -95,7 +124,7 @@ class PersonDetector:
             # Link detection to depth for spatial coordinates
             spatial_detection_network = pipeline.create(dai.node.MobileNetSpatialDetectionNetwork)
             spatial_detection_network.setConfidenceThreshold(self.confidence_threshold)
-            spatial_detection_network.setBlobPath("/usr/local/lib/python3.11/dist-packages/depthai/resources/nn/mobilenet-ssd/mobilenet-ssd.blob")
+            spatial_detection_network.setBlobPath(self.model_path)
             spatial_detection_network.setBoundingBoxScaleFactor(0.5)
             spatial_detection_network.setDepthLowerThreshold(100)  # 10cm
             spatial_detection_network.setDepthUpperThreshold(5000)  # 5m
