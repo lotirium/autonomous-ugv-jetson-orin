@@ -183,6 +183,9 @@ class RobotServer:
         self.voice_ws = None  # WebSocket connection to cloud /voice endpoint
         self.audio_sample_rate = config.SAMPLE_RATE  # Default, will be updated in init_audio
         
+        # Navigation state (for USB bandwidth management)
+        self.is_navigating = False  # True when OAK-D navigation is active
+        
         print("=" * 60)
         print("  ROVY ROBOT SERVER")
         print(f"  REST API: http://0.0.0.0:8000")
@@ -210,76 +213,11 @@ class RobotServer:
             return False
     
     def init_camera(self):
-        """Initialize camera - OAK-D required for manual control, USB as fallback for other uses."""
+        """Initialize camera - USB for streaming, OAK-D lazy-loaded only when needed."""
+        # Skip OAK-D initialization at startup - it will be lazy-loaded when needed
+        # This prevents resource waste and issues when OAK-D is not required
+        print("[Camera] OAK-D will be initialized on-demand for vision commands")
         oakd_initialized = False
-        # Try OAK-D camera first (required for manual control)
-        if DEPTHAI_OK:
-            try:
-                print("[Camera] Trying OAK-D camera...")
-                available = dai.Device.getAllAvailableDevices()
-                if available:
-                    print(f"[Camera] Found {len(available)} OAK-D device(s)")
-                    
-                    # Create OAK-D pipeline
-                    pipeline = dai.Pipeline()
-                    
-                    # Create color camera node
-                    if hasattr(dai, "node") and hasattr(dai.node, "ColorCamera"):
-                        camera = pipeline.create(dai.node.ColorCamera)
-                    else:
-                        camera = pipeline.createColorCamera()
-                    
-                    camera.setPreviewSize(config.CAMERA_WIDTH, config.CAMERA_HEIGHT)
-                    camera.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-                    camera.setInterleaved(False)
-                    camera.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
-                    # Use higher FPS for manual control (OAK-D can handle 30 FPS)
-                    manual_control_fps = 30
-                    camera.setFps(manual_control_fps)
-                    
-                    # Create XLinkOut for preview
-                    if hasattr(dai, "node") and hasattr(dai.node, "XLinkOut"):
-                        xout = pipeline.create(dai.node.XLinkOut)
-                    else:
-                        xout = pipeline.createXLinkOut()
-                    xout.setStreamName("preview")
-                    camera.preview.link(xout.input)
-                    
-                    # Start pipeline
-                    self.oakd_device = dai.Device(pipeline)
-                    # Use maxSize=4 and blocking=False to get latest frame (drops old frames)
-                    self.oakd_queue = self.oakd_device.getOutputQueue("preview", maxSize=4, blocking=False)
-                    
-                    # Test capture
-                    time.sleep(0.5)  # Give it time to initialize
-                    frame_data = self.oakd_queue.tryGet()
-                    if frame_data is not None:
-                        frame = frame_data.getCvFrame()
-                        if frame is not None:
-                            self.camera_type = 'oakd'
-                            print("[Camera] OAK-D camera ready")
-                            oakd_initialized = True
-                        else:
-                            self.oakd_device.close()
-                            self.oakd_device = None
-                            self.oakd_queue = None
-                    else:
-                        self.oakd_device.close()
-                        self.oakd_device = None
-                        self.oakd_queue = None
-            except Exception as e:
-                print(f"[Camera] OAK-D init failed: {e}")
-                print("[Camera] WARNING: Manual control requires OAK-D camera")
-                if self.oakd_device:
-                    try:
-                        self.oakd_device.close()
-                    except:
-                        pass
-                    self.oakd_device = None
-                    self.oakd_queue = None
-        else:
-            print("[Camera] WARNING: DepthAI not available - OAK-D camera cannot be used")
-            print("[Camera] WARNING: Manual control will not work without OAK-D camera")
         
         # Always try to initialize USB camera (for /snapshot endpoint, even when OAK-D is present)
         usb_initialized = False
@@ -831,6 +769,79 @@ class RobotServer:
                 print(f"[Voice] Receive loop error: {e}")
                 await asyncio.sleep(1.0)
     
+    def ensure_oakd_initialized(self):
+        """Lazy-load OAK-D camera only when needed."""
+        if self.oakd_device is not None and self.oakd_queue is not None:
+            return True  # Already initialized
+        
+        print("[Camera] Lazy-loading OAK-D camera for vision command...")
+        if not DEPTHAI_OK:
+            print("[Camera] ERROR: DepthAI not available")
+            return False
+        
+        try:
+            available = dai.Device.getAllAvailableDevices()
+            if not available:
+                print("[Camera] ERROR: No OAK-D devices found")
+                return False
+            
+            print(f"[Camera] Found {len(available)} OAK-D device(s)")
+            
+            # Create OAK-D pipeline
+            pipeline = dai.Pipeline()
+            
+            # Create color camera node
+            if hasattr(dai, "node") and hasattr(dai.node, "ColorCamera"):
+                camera = pipeline.create(dai.node.ColorCamera)
+            else:
+                camera = pipeline.createColorCamera()
+            
+            camera.setPreviewSize(config.CAMERA_WIDTH, config.CAMERA_HEIGHT)
+            camera.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+            camera.setInterleaved(False)
+            camera.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+            camera.setFps(30)
+            
+            # Create XLinkOut for preview
+            if hasattr(dai, "node") and hasattr(dai.node, "XLinkOut"):
+                xout = pipeline.create(dai.node.XLinkOut)
+            else:
+                xout = pipeline.createXLinkOut()
+            xout.setStreamName("preview")
+            camera.preview.link(xout.input)
+            
+            # Start pipeline
+            self.oakd_device = dai.Device(pipeline)
+            self.oakd_queue = self.oakd_device.getOutputQueue("preview", maxSize=4, blocking=False)
+            
+            # Test capture
+            time.sleep(0.5)
+            frame_data = self.oakd_queue.tryGet()
+            if frame_data is not None:
+                frame = frame_data.getCvFrame()
+                if frame is not None:
+                    self.camera_type = 'oakd'
+                    print("[Camera] OAK-D camera initialized successfully")
+                    return True
+            
+            # Failed - clean up
+            self.oakd_device.close()
+            self.oakd_device = None
+            self.oakd_queue = None
+            print("[Camera] ERROR: OAK-D test capture failed")
+            return False
+            
+        except Exception as e:
+            print(f"[Camera] ERROR: OAK-D initialization failed: {e}")
+            if self.oakd_device:
+                try:
+                    self.oakd_device.close()
+                except:
+                    pass
+                self.oakd_device = None
+                self.oakd_queue = None
+            return False
+    
     def _reinit_oakd(self):
         """Reinitialize OAK-D camera after error."""
         # Prevent too frequent reinitializations (max once per 5 seconds)
@@ -917,12 +928,27 @@ class RobotServer:
                 self.oakd_queue = None
             return False
     
-    def capture_image(self) -> Optional[bytes]:
-        """Capture image from camera as JPEG bytes."""
+    def capture_image(self, prefer_oakd: bool = False) -> Optional[bytes]:
+        """
+        Capture image from camera as JPEG bytes.
+        
+        Args:
+            prefer_oakd: If True, use OAK-D if initialized. If False (default), use USB camera.
+        """
         frame = None
         
-        # Capture from OAK-D if available
-        if self.camera_type == 'oakd' and self.oakd_queue is not None:
+        # Prefer USB camera by default (more reliable, less resource intensive)
+        if not prefer_oakd and self.usb_camera and CAMERA_OK:
+            ret, frame = self.usb_camera.read()
+            if ret and frame is not None:
+                # Encode as JPEG
+                _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, config.JPEG_QUALITY])
+                self.last_image = buffer.tobytes()
+                self.last_image_time = time.time()
+                return self.last_image
+        
+        # Fallback to OAK-D only if USB camera failed or prefer_oakd is True
+        if self.oakd_queue is not None:
             try:
                 # Get the latest frame (drop old ones if queue has multiple)
                 frame_data = None
@@ -935,15 +961,6 @@ class RobotServer:
                 if frame_data is not None:
                     frame = frame_data.getCvFrame()
                     self.oakd_error_count = 0  # Reset error count on success
-                else:
-                    # Queue is empty - no frame available yet
-                    # This is normal if requests come faster than camera FPS
-                    # Only log occasionally to avoid spam (every 10th occurrence)
-                    if not hasattr(self, '_empty_queue_count'):
-                        self._empty_queue_count = 0
-                    self._empty_queue_count += 1
-                    if self._empty_queue_count % 10 == 1:
-                        print(f"[Camera] OAK-D queue empty (no frame available) - request #{self._empty_queue_count}")
             except Exception as e:
                 error_str = str(e)
                 # Check if it's an X_LINK_ERROR (communication error)
@@ -953,25 +970,12 @@ class RobotServer:
                         print(f"[Camera] OAK-D communication error detected, attempting recovery...")
                         if self._reinit_oakd():
                             self.oakd_error_count = 0
-                            # Try to capture again after reinit
-                            try:
-                                frame_data = self.oakd_queue.tryGet()
-                                if frame_data is not None:
-                                    frame = frame_data.getCvFrame()
-                            except:
-                                pass
                         else:
                             print(f"[Camera] OAK-D reinitialization failed")
                     else:
                         print(f"[Camera] OAK-D capture error ({self.oakd_error_count}/3): {error_str[:100]}")
                 else:
                     print(f"[Camera] OAK-D capture error: {error_str[:100]}")
-                return None
-        
-        # Capture from USB camera if OAK-D not available
-        elif self.camera_type == 'usb' and self.camera and CAMERA_OK:
-            ret, frame = self.camera.read()
-            if not ret:
                 return None
         
         if frame is None:
@@ -1134,10 +1138,12 @@ class RobotServer:
             try:
                 now = time.time()
                 
-                # Send image periodically
-                if CAMERA_OK and self.camera and (now - last_image_time) >= image_interval:
-                    image_bytes = self.capture_image()
-                    if image_bytes:
+                # Send image periodically - use USB camera for cloud streaming
+                if CAMERA_OK and self.usb_camera and (now - last_image_time) >= image_interval:
+                    ret, frame = self.usb_camera.read()
+                    if ret and frame is not None:
+                        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, config.JPEG_QUALITY])
+                        image_bytes = buffer.tobytes()
                         await self.ws.send(json.dumps({
                             "type": "image_data",
                             "image_base64": base64.b64encode(image_bytes).decode('utf-8'),
@@ -1147,19 +1153,8 @@ class RobotServer:
                         }))
                     last_image_time = now
                 
-                # Detect gestures from OAK-D frames (throttled to every 500ms)
-                if (self.camera_type == 'oakd' and 
-                    CAMERA_OK and 
-                    self.oakd_queue is not None and 
-                    (now - last_gesture_time) >= gesture_interval):
-                    image_bytes = self.capture_image()
-                    if image_bytes:
-                        # Run gesture detection in background (don't block streaming)
-                        asyncio.create_task(self.detect_gesture_from_frame(image_bytes))
-                        if not hasattr(self, '_gesture_debug_logged'):
-                            print("[Gesture] Starting gesture detection from OAK-D frames")
-                            self._gesture_debug_logged = True
-                    last_gesture_time = now
+                # Gesture detection DISABLED in cloud streaming - only enable on-demand
+                # Gestures will be detected when explicitly requested via vision commands
                 
                 # Send sensor data periodically
                 if self.rover and (now - last_sensor_time) >= sensor_interval:
@@ -1430,15 +1425,20 @@ async def get_status():
 
 @app.get("/shot")
 async def get_shot():
-    """Get single camera frame - uses OAK-D for manual control."""
+    """Get single camera frame - uses USB camera for manual control."""
     robot = get_robot()
     
-    # Manual control requires OAK-D camera
-    if robot.camera_type != 'oakd' or robot.oakd_queue is None:
-        raise HTTPException(status_code=503, detail="OAK-D camera required for manual control")
+    # Use USB camera for manual control (faster and more reliable)
+    if robot.usb_camera is None or not robot.usb_camera.isOpened():
+        raise HTTPException(status_code=503, detail="USB camera not available")
     
-    # Try to capture a fresh frame first
-    image_bytes = robot.capture_image()
+    # Capture from USB camera
+    ret, frame = robot.usb_camera.read()
+    if ret and frame is not None:
+        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, config.JPEG_QUALITY])
+        image_bytes = buffer.tobytes()
+    else:
+        image_bytes = None
     
     # If capture failed (queue empty), try to use cached image as fallback
     if not image_bytes:
@@ -1499,16 +1499,16 @@ async def get_snapshot():
 
 @app.get("/video")
 async def video_stream():
-    """MJPEG video stream - uses OAK-D for manual control."""
+    """MJPEG video stream - uses USB camera for mobile app."""
     robot = get_robot()
     
-    # Manual control requires OAK-D camera
-    if robot.camera_type != 'oakd' or robot.oakd_queue is None:
-        raise HTTPException(status_code=503, detail="OAK-D camera required for manual control")
+    # Use USB camera for mobile app streaming
+    if robot.usb_camera is None or not robot.usb_camera.isOpened():
+        raise HTTPException(status_code=503, detail="USB camera not available")
     
-    # Use 30 FPS for manual control
-    manual_fps = 30
-    frame_interval = 1.0 / manual_fps
+    # Use 30 FPS for mobile app
+    stream_fps = 30
+    frame_interval = 1.0 / stream_fps
     
     def generate_frames():
         consecutive_failures = 0
@@ -1516,8 +1516,14 @@ async def video_stream():
         
         while True:
             start_time = time.time()
-            image_bytes = robot.capture_image()
-            if image_bytes:
+            
+            # Capture directly from USB camera
+            ret, frame = robot.usb_camera.read()
+            if ret and frame is not None:
+                # Encode to JPEG
+                _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, config.JPEG_QUALITY])
+                image_bytes = buffer.tobytes()
+                
                 consecutive_failures = 0  # Reset on success
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + image_bytes + b'\r\n')
@@ -1541,29 +1547,48 @@ async def video_stream():
 
 @app.websocket("/camera/ws")
 async def camera_websocket(websocket: WebSocket):
-    """WebSocket camera stream (base64 JPEG) - uses OAK-D for manual control."""
+    """WebSocket camera stream (base64 JPEG) - uses USB camera for mobile app."""
     robot = get_robot()
     
-    # Manual control requires OAK-D camera
-    if robot.camera_type != 'oakd' or robot.oakd_queue is None:
-        await websocket.close(code=1011, reason="OAK-D camera required for manual control")
+    # Use USB camera for mobile app streaming (separate from OAK-D used for navigation)
+    if robot.usb_camera is None or not robot.usb_camera.isOpened():
+        await websocket.accept()
+        await websocket.close(code=1011, reason="USB camera not available")
         return
     
     await websocket.accept()
-    print("[API] Camera WebSocket connected (OAK-D)")
+    print("[API] Camera WebSocket connected (USB Camera)")
     
-    # Use 30 FPS for manual control (OAK-D can handle it)
-    manual_fps = 30
-    frame_interval = 1.0 / manual_fps
+    # Use 30 FPS for mobile app
+    stream_fps = 30
+    frame_interval = 1.0 / stream_fps
     
     try:
         consecutive_failures = 0
-        max_failures = 10  # If 10 consecutive frames fail, close connection
+        max_failures = 50  # Increased tolerance - camera may take time to stabilize
         
         while True:
             start_time = time.time()
-            image_bytes = robot.get_cached_image()
-            if image_bytes:
+            
+            # Check if navigation is active (OAK-D using USB bandwidth)
+            if robot.is_navigating:
+                # Send a status message instead of camera frames during navigation
+                # This prevents USB bandwidth contention
+                await websocket.send_json({
+                    "status": "navigation_active",
+                    "message": "Camera paused during autonomous navigation",
+                    "timestamp": time.time()
+                })
+                await asyncio.sleep(1.0)  # Update status every second
+                continue
+            
+            # Capture directly from USB camera
+            ret, frame = robot.usb_camera.read()
+            if ret and frame is not None:
+                # Encode to JPEG
+                _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, config.JPEG_QUALITY])
+                image_bytes = buffer.tobytes()
+                
                 consecutive_failures = 0  # Reset on success
                 await websocket.send_json({
                     "frame": base64.b64encode(image_bytes).decode('utf-8'),
@@ -1577,6 +1602,8 @@ async def camera_websocket(websocket: WebSocket):
                     print(f"[API] Camera stream failed {max_failures} times, closing connection")
                     await websocket.close(code=1011, reason="Camera capture failed")
                     break
+                # Add small delay on failure to avoid tight loop
+                await asyncio.sleep(0.1)
             
             # Sleep only the remaining time to maintain target FPS
             elapsed = time.time() - start_time
@@ -1585,6 +1612,8 @@ async def camera_websocket(websocket: WebSocket):
                 await asyncio.sleep(sleep_time)
     except WebSocketDisconnect:
         print("[API] Camera WebSocket disconnected")
+    except Exception as e:
+        print(f"[API] Camera WebSocket error: {e}")
 
 
 @app.websocket("/json")
@@ -1784,6 +1813,9 @@ async def control_navigation(command: NavigationCommand):
     if command.action == 'start_explore':
         def start_nav():
             try:
+                robot.is_navigating = True  # Pause USB camera to avoid bandwidth contention
+                print("[Navigation API] USB camera paused (OAK-D navigation active)")
+                
                 if robot.navigator is None:
                     from rovy_integration import RovyNavigator
                     robot.navigator = RovyNavigator(rover_instance=robot.rover)
@@ -1795,10 +1827,44 @@ async def control_navigation(command: NavigationCommand):
                 print(f"[Navigation API] Error: {e}")
                 import traceback
                 traceback.print_exc()
+            finally:
+                robot.is_navigating = False  # Resume USB camera
+                print("[Navigation API] USB camera resumed")
         
         # Run navigation in separate thread
         threading.Thread(target=start_nav, daemon=True).start()
         return {"status": "started", "action": "explore"}
+    
+    elif command.action == 'come_to_me':
+        def come_to_person():
+            try:
+                robot.is_navigating = True  # Pause USB camera to avoid bandwidth contention
+                print("[Navigation API] USB camera paused (OAK-D person detection active)")
+                
+                if robot.navigator is None:
+                    from rovy_integration import RovyNavigator
+                    robot.navigator = RovyNavigator(rover_instance=robot.rover)
+                    robot.navigator.start()
+                
+                print("[Navigation API] Starting 'come to me' command")
+                success = robot.navigator.come_to_person(max_approach_distance=0.8)
+                
+                if success:
+                    print("[Navigation API] ✅ Successfully came to person!")
+                else:
+                    print("[Navigation API] ❌ Failed to come to person")
+                    
+            except Exception as e:
+                print(f"[Navigation API] Come to me error: {e}")
+                import traceback
+                traceback.print_exc()
+            finally:
+                robot.is_navigating = False  # Resume USB camera
+                print("[Navigation API] USB camera resumed")
+        
+        # Run navigation in separate thread
+        threading.Thread(target=come_to_person, daemon=True).start()
+        return {"status": "started", "action": "come_to_me"}
     
     elif command.action == 'stop':
         if hasattr(robot, 'navigator') and robot.navigator:
@@ -1809,10 +1875,14 @@ async def control_navigation(command: NavigationCommand):
                     robot.navigator = None
                 except Exception as e:
                     print(f"[Navigation API] Stop error: {e}")
+                finally:
+                    robot.is_navigating = False  # Resume USB camera
+                    print("[Navigation API] USB camera resumed")
             
             threading.Thread(target=stop_nav, daemon=True).start()
             return {"status": "stopped", "action": "stop"}
         else:
+            robot.is_navigating = False  # Ensure flag is cleared
             return {"status": "already_stopped"}
     
     elif command.action == 'goto':
@@ -1824,6 +1894,9 @@ async def control_navigation(command: NavigationCommand):
         
         def navigate_to():
             try:
+                robot.is_navigating = True  # Pause USB camera
+                print("[Navigation API] USB camera paused (OAK-D navigation active)")
+                
                 if robot.navigator is None:
                     from rovy_integration import RovyNavigator
                     robot.navigator = RovyNavigator(rover_instance=robot.rover)
@@ -1835,6 +1908,9 @@ async def control_navigation(command: NavigationCommand):
                 print(f"[Navigation API] Error: {e}")
                 import traceback
                 traceback.print_exc()
+            finally:
+                robot.is_navigating = False  # Resume USB camera
+                print("[Navigation API] USB camera resumed")
         
         threading.Thread(target=navigate_to, daemon=True).start()
         return {"status": "started", "action": "goto", "target": {"x": x, "y": y}}
