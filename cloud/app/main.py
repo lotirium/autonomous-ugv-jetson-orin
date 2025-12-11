@@ -1097,6 +1097,22 @@ async def voice_websocket(websocket: WebSocket):
                                         elif 'electronic' in transcript_lower or 'edm' in transcript_lower:
                                             music_genre = 'electronic'
                                         
+                                        # Start music playback on cloud server (where YouTube Music is authenticated)
+                                        music_started = False
+                                        try:
+                                            from robot.music_player import get_music_player
+                                            music_player = get_music_player()
+                                            if music_player and music_player.yt_music:
+                                                LOGGER.info(f"🎵 Starting {music_genre} music on cloud server")
+                                                await anyio.to_thread.run_sync(music_player.play_random, music_genre)
+                                                music_started = True
+                                                await anyio.sleep(2)  # Let music start
+                                            else:
+                                                LOGGER.warning("Music player not available on cloud, dancing without music")
+                                        except Exception as music_error:
+                                            LOGGER.warning(f"Failed to start music on cloud: {music_error}")
+                                        
+                                        # Tell robot to dance WITHOUT music (music plays from cloud)
                                         pi_ip = os.getenv("ROVY_ROBOT_IP", "100.72.107.106")
                                         dance_url = f"http://{pi_ip}:8000/dance"
                                         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -1105,7 +1121,7 @@ async def voice_websocket(websocket: WebSocket):
                                                 json={
                                                     "style": style, 
                                                     "duration": 10, 
-                                                    "with_music": True,
+                                                    "with_music": False,  # Robot doesn't play music
                                                     "music_genre": music_genre
                                                 }
                                             )
@@ -1119,6 +1135,16 @@ async def voice_websocket(websocket: WebSocket):
                                                 pi_url = f"http://{pi_ip}:8000/speak"
                                                 async with httpx.AsyncClient(timeout=10.0) as tts_client:
                                                     await tts_client.post(pi_url, json={"text": response_text})
+                                                
+                                                # Wait for dance to complete (10 seconds), then stop music
+                                                if music_started:
+                                                    await anyio.sleep(10)
+                                                    try:
+                                                        music_player.stop()
+                                                        LOGGER.info("🎵 Stopped music after dance")
+                                                    except Exception as stop_error:
+                                                        LOGGER.warning(f"Failed to stop music: {stop_error}")
+                                                
                                                 continue
                                     except Exception as dance_error:
                                         LOGGER.error(f"Dance command failed: {dance_error}")
@@ -1677,22 +1703,18 @@ async def trigger_dance(request: dict):
         raise HTTPException(status_code=501, detail="Dance function not supported by this rover")
     
     try:
-        # If music requested, start it first by sending API call to robot
+        # If music requested, play it on cloud server (where YouTube Music is authenticated)
+        music_player = None
         if with_music:
             try:
-                import httpx
-                pi_ip = os.getenv("ROVY_ROBOT_IP", "100.72.107.106")
-                music_url = f"http://{pi_ip}:8000/music"
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    music_response = await client.post(
-                        music_url,
-                        json={"action": "play", "genre": music_genre}
-                    )
-                    if music_response.status_code == 200:
-                        LOGGER.info(f"🎵 Music started: {music_genre}")
-                        await anyio.sleep(2)  # Let music start
-                    else:
-                        LOGGER.warning(f"Music failed with status {music_response.status_code}")
+                from robot.music_player import get_music_player
+                music_player = get_music_player()
+                if music_player and music_player.yt_music:
+                    LOGGER.info(f"🎵 Starting {music_genre} music on cloud server")
+                    await anyio.to_thread.run_sync(music_player.play_random, music_genre)
+                    await anyio.sleep(2)  # Let music start
+                else:
+                    LOGGER.warning("Music player not available on cloud, dancing without music")
             except Exception as music_error:
                 LOGGER.warning(f"Music failed, dancing without: {music_error}")
         
@@ -1700,14 +1722,10 @@ async def trigger_dance(request: dict):
         await anyio.to_thread.run_sync(base_controller.dance, style, duration)
         
         # Stop music after dance if it was started
-        if with_music:
+        if with_music and music_player and music_player.is_playing:
             try:
-                import httpx
-                pi_ip = os.getenv("ROVY_ROBOT_IP", "100.72.107.106")
-                music_url = f"http://{pi_ip}:8000/music"
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    await client.post(music_url, json={"action": "stop"})
-                    LOGGER.info("🎵 Music stopped after dance")
+                music_player.stop()
+                LOGGER.info("🎵 Music stopped after dance")
             except Exception as stop_error:
                 LOGGER.warning(f"Failed to stop music: {stop_error}")
         
@@ -1749,31 +1767,73 @@ async def control_music(request: dict):
         raise HTTPException(status_code=400, detail=f"Invalid genre. Must be one of: {valid_genres}")
     
     try:
-        # Forward music control request to robot's API
-        import httpx
-        pi_ip = os.getenv("ROVY_ROBOT_IP", "100.72.107.106")
-        music_url = f"http://{pi_ip}:8000/music"
+        # Try to play music on cloud server (where YouTube Music is authenticated)
+        from robot.music_player import get_music_player
+        music_player = get_music_player()
         
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            music_response = await client.post(
-                music_url,
-                json={"action": action, "genre": genre}
-            )
+        if not music_player or not music_player.yt_music:
+            # If cloud doesn't have YouTube Music, forward to robot
+            LOGGER.info("Cloud music not available, forwarding to robot")
+            import httpx
+            pi_ip = os.getenv("ROVY_ROBOT_IP", "100.72.107.106")
+            music_url = f"http://{pi_ip}:8000/music"
             
-            if music_response.status_code == 200:
-                result = music_response.json()
-                if action == 'play':
-                    LOGGER.info(f"🎵 Playing {genre} music via robot")
-                elif action == 'stop':
-                    LOGGER.info("⏹️ Stopping music via robot")
-                return result
-            else:
-                error_detail = music_response.text
-                raise HTTPException(
-                    status_code=music_response.status_code,
-                    detail=f"Robot music control failed: {error_detail}"
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                music_response = await client.post(
+                    music_url,
+                    json={"action": action, "genre": genre}
                 )
+                
+                if music_response.status_code == 200:
+                    result = music_response.json()
+                    if action == 'play':
+                        LOGGER.info(f"🎵 Playing {genre} music via robot")
+                    elif action == 'stop':
+                        LOGGER.info("⏹️ Stopping music via robot")
+                    return result
+                else:
+                    error_detail = music_response.text
+                    raise HTTPException(
+                        status_code=music_response.status_code,
+                        detail=f"Music control failed: {error_detail}"
+                    )
+        
+        # Play music on cloud server
+        if action == 'play':
+            LOGGER.info(f"🎵 Playing {genre} music on cloud server")
+            success = await anyio.to_thread.run_sync(music_player.play_random, genre)
+            
+            if success:
+                return {
+                    "status": "ok",
+                    "action": "playing",
+                    "genre": genre,
+                    "current_song": music_player.current_song,
+                    "location": "cloud"
+                }
+            else:
+                raise HTTPException(status_code=404, detail=f"No {genre} songs found")
+        
+        elif action == 'stop':
+            LOGGER.info("⏹️ Stopping music on cloud server")
+            music_player.stop()
+            return {
+                "status": "ok",
+                "action": "stopped",
+                "location": "cloud"
+            }
+        
+        elif action == 'status':
+            status = music_player.get_status()
+            return {
+                "status": "ok",
+                "is_playing": status['is_playing'],
+                "current_song": status['current_song'],
+                "location": "cloud"
+            }
     
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Music player module not available")
     except httpx.RequestError as exc:
         LOGGER.error(f"Failed to connect to robot: {exc}", exc_info=True)
         raise HTTPException(status_code=503, detail="Cannot connect to robot")
