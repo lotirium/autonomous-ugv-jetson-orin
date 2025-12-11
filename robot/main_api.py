@@ -2018,15 +2018,18 @@ async def trigger_dance(request: dict):
             ])
             
             # Start music if requested
-            music_player = None
+            music_started = False
             if with_music:
                 try:
-                    from music_player import get_music_player
-                    music_player = get_music_player()
-                    
-                    if music_player and music_player.yt_music:
-                        print(f"[Dance] 🎵 Starting {music_genre} music...")
-                        music_player.play_random(music_genre)
+                    import requests
+                    print(f"[Dance] 🎵 Starting {music_genre} music...")
+                    response = requests.post(
+                        "http://localhost:8000/music",
+                        json={"action": "play", "genre": music_genre},
+                        timeout=5
+                    )
+                    if response.status_code == 200:
+                        music_started = True
                         import time
                         time.sleep(2)  # Let music start
                     else:
@@ -2038,9 +2041,17 @@ async def trigger_dance(request: dict):
             robot.rover.dance(style=style, duration=duration)
             
             # Stop music after dance
-            if music_player and music_player.is_playing:
-                print("[Dance] 🎵 Stopping music...")
-                music_player.stop()
+            if music_started:
+                try:
+                    import requests
+                    print("[Dance] 🎵 Stopping music...")
+                    requests.post(
+                        "http://localhost:8000/music",
+                        json={"action": "stop"},
+                        timeout=5
+                    )
+                except Exception as stop_error:
+                    print(f"[Dance] ⚠️ Failed to stop music: {stop_error}")
             
             # Reset display after dance
             robot.rover.display_lines([
