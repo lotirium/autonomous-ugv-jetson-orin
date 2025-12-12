@@ -126,12 +126,38 @@ export default function SummariesScreen() {
     setUploading(true);
     
     try {
-      // Create a blob from the file URI
-      const response = await fetch(selectedFile.uri);
-      const blob = await response.blob();
+      // In React Native, we need to create a proper file object for FormData
+      // The URI from DocumentPicker is a local file path
+      const formData = new FormData();
+      
+      // @ts-ignore - React Native FormData accepts URI
+      formData.append('audio', {
+        uri: selectedFile.uri,
+        type: selectedFile.mimeType || 'audio/wav',
+        name: selectedFile.name || 'recording.wav',
+      });
+      
+      if (uploadTitle) {
+        formData.append('title', uploadTitle);
+      }
+      formData.append('meeting_type', uploadType);
 
-      // Upload to cloud
-      const result = await cloudApi.uploadMeeting(blob, uploadTitle || undefined, uploadType);
+      // Upload directly using axios with the FormData
+      const baseUrl = cloudApi.getBaseUrl();
+      const response = await fetch(`${baseUrl}/meetings/upload`, {
+        method: 'POST',
+        body: formData,
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
+        throw new Error(errorData.detail || `Upload failed with status ${response.status}`);
+      }
+
+      const result = await response.json();
 
       Alert.alert('Success', 'Meeting uploaded and processed successfully!');
       
@@ -143,9 +169,10 @@ export default function SummariesScreen() {
       
       // Refresh meetings
       await fetchMeetings(true);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Upload error:', err);
-      Alert.alert('Error', 'Failed to upload meeting. Please try again.');
+      const errorMessage = err?.message || 'Failed to upload meeting. Please try again.';
+      Alert.alert('Error', errorMessage);
     } finally {
       setUploading(false);
     }
