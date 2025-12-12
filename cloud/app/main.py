@@ -2164,6 +2164,15 @@ async def get_health() -> HealthResponse:
         except Exception as exc:
             LOGGER.debug("Failed to get battery for health check: %s", exc)
     
+    # Check cloud service availability
+    assistant_available = _get_assistant() is not None
+    speech_available = _get_speech() is not None
+    meeting_service_available = (
+        MEETING_SERVICE_AVAILABLE and 
+        hasattr(app.state, 'meeting_service') and 
+        app.state.meeting_service is not None
+    )
+    
     return HealthResponse(
         ok=True,
         name=ROBOT_NAME,
@@ -2172,6 +2181,9 @@ async def get_health() -> HealthResponse:
         mode=Mode.ACCESS_POINT,
         version=APP_VERSION,
         battery=battery_percent,
+        assistant_loaded=assistant_available,
+        speech_loaded=speech_available,
+        meeting_service_available=meeting_service_available,
     )
 
 

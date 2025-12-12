@@ -9,9 +9,11 @@
  */
 
 import axios, { AxiosInstance } from "axios";
+import { CLOUD_API_BASE_URL } from "@/constants/env";
 
 // Default Cloud PC IP (Tailscale) - FastAPI runs on port 8000
-export const DEFAULT_CLOUD_URL = "http://100.121.110.125:8000";
+// Falls back to environment variable if set, otherwise uses hardcoded IP
+export const DEFAULT_CLOUD_URL = CLOUD_API_BASE_URL || "http://100.121.110.125:8000";
 
 export interface ChatRequest {
   message: string;
@@ -50,8 +52,16 @@ export interface STTResponse {
 
 export interface CloudHealth {
   ok: boolean;
-  assistant_loaded: boolean;
-  speech_loaded: boolean;
+  assistant_loaded?: boolean;
+  speech_loaded?: boolean;
+  meeting_service_available?: boolean;
+  // Robot fields (when cloud runs on robot)
+  name?: string;
+  serial?: string;
+  claimed?: boolean;
+  mode?: string;
+  version?: string;
+  battery?: number;
 }
 
 export interface MeetingSummary {

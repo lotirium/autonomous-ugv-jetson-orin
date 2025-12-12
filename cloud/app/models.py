@@ -19,6 +19,10 @@ class HealthResponse(BaseModel):
     mode: Mode = Field(..., description="Current connectivity mode")
     version: str = Field(..., description="Firmware/software version")
     battery: Optional[conint(ge=0, le=100)] = Field(None, description="Battery percentage (0-100)")
+    # Cloud service status
+    assistant_loaded: Optional[bool] = Field(None, description="Whether AI assistant is available")
+    speech_loaded: Optional[bool] = Field(None, description="Whether speech processing is available")
+    meeting_service_available: Optional[bool] = Field(None, description="Whether meeting service is available")
 
 
 class NetworkInfoResponse(BaseModel):
