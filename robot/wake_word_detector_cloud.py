@@ -84,7 +84,8 @@ class CloudWakeWordDetector:
         # AGC (Automatic Gain Control) for distant speech
         self.target_rms = 0.15  # Target RMS level for normalization (increased for better distant voice pickup)
         
-        logger.info(f"Initializing CloudWakeWordDetector for: {self.wake_words}")
+        print(f"[WakeWord] Initializing for: {self.wake_words}")
+        print(f"[WakeWord] VAD Settings: threshold={self.vad_threshold}, min_speech={self.min_speech_duration}s, min_silence={self.min_silence_duration}s")
         if self.needs_resampling:
             logger.info(f"Audio: {self.device_sample_rate}Hz (device) -> {self.sample_rate}Hz (processing)")
         
@@ -178,12 +179,13 @@ class CloudWakeWordDetector:
                 # Use scipy's resample for better quality
                 audio_float = signal.resample(audio_float, num_samples)
             
-            # Apply AGC to boost quiet audio from distance
+            # Apply AGC to boost quiet audio from distance (reduced to preserve quality)
             rms = np.sqrt(np.mean(audio_float ** 2))
-            if rms > 0.0005:  # Lower threshold to boost quieter sounds
+            if rms > 0.005:  # Only amplify reasonable audio to avoid noise amplification
                 gain = self.target_rms / rms
-                gain = min(gain, 12.0)  # Max 12x boost for transcription (increased for distance)
+                gain = min(gain, 3.0)  # Max 3x boost to preserve audio quality
                 audio_float = audio_float * gain
+                print(f"[WakeWord] Applied AGC to wake detection: gain={gain:.2f}x")
             
             # Final normalization to optimal range
             if len(audio_float) > 0:
@@ -193,6 +195,8 @@ class CloudWakeWordDetector:
             
             # Convert back to int16
             audio_int16 = (audio_float * 32767).astype(np.int16)
+            
+            print(f"[WakeWord] Prepared audio: {len(audio_int16)} samples at {self.sample_rate}Hz")
             
             # Create proper WAV file in memory
             import io
@@ -206,6 +210,7 @@ class CloudWakeWordDetector:
                 wav_file.writeframes(audio_int16.tobytes())
             
             wav_bytes = wav_buffer.getvalue()
+            print(f"[WakeWord] Created WAV file: {len(wav_bytes)} bytes, sending to {self.cloud_url.replace('ws://', 'http://').replace('/voice', '')}/stt")
             
             # DEBUG: Optionally save audio to file for inspection (disabled by default)
             # debug_filename = f"/tmp/debug_audio_{int(time.time())}.wav"
@@ -299,15 +304,28 @@ class CloudWakeWordDetector:
         
         try:
             # Calculate chunk size for VAD
-            required_samples_after_resample = 512
+            required_samples_after_resample = 512  # VAD requires exactly 512 samples
             if self.needs_resampling:
                 decimation_factor = int(self.device_sample_rate / self.sample_rate)
                 chunk_samples = required_samples_after_resample * decimation_factor
             else:
                 chunk_samples = required_samples_after_resample
             
-            # Open audio stream with retry logic
-            max_retries = 3
+            # Ensure any previous stream is closed before opening new one
+            if self.stream:
+                try:
+                    if self.stream.is_active():
+                        self.stream.stop_stream()
+                    self.stream.close()
+                except:
+                    pass
+                self.stream = None
+            
+            # Wait for ALSA to fully release device
+            await asyncio.sleep(0.5)
+            
+            # Open audio stream with retry logic and longer delays
+            max_retries = 5
             for retry in range(max_retries):
                 try:
                     self.stream = self.pyaudio.open(
@@ -318,13 +336,17 @@ class CloudWakeWordDetector:
                         input_device_index=self.device_index,
                         frames_per_buffer=chunk_samples
                     )
+                    logger.info(f"✅ Audio stream opened successfully")
                     break  # Success
                 except Exception as e:
                     logger.error(f"Failed to open audio stream (attempt {retry+1}/{max_retries}): {e}")
                     if retry < max_retries - 1:
-                        await asyncio.sleep(1.0)  # Wait before retry
+                        # Exponential backoff: wait longer each retry
+                        wait_time = min(2.0 ** retry, 8.0)  # 1s, 2s, 4s, 8s, 8s
+                        logger.info(f"Waiting {wait_time}s before retry...")
+                        await asyncio.sleep(wait_time)
                     else:
-                        logger.error("Could not open audio stream after retries")
+                        logger.error("❌ Could not open audio stream after retries")
                         return False
             
             # Buffer for collecting speech
@@ -343,20 +365,61 @@ class CloudWakeWordDetector:
                 
                 # Read audio chunk (non-blocking with timeout protection)
                 try:
+                    # Simple check - if no stream, we're done (detection cycle ended)
+                    if not self.stream:
+                        logger.info("Stream closed, ending detection cycle")
+                        break
+                    
+                    # Check if stream is still valid before reading
+                    if not self.stream.is_active():
+                        logger.warning("Stream is no longer active, ending detection cycle")
+                        break
+                    
                     # Wrap blocking read in asyncio.to_thread with timeout to prevent hanging
                     try:
                         audio_bytes = await asyncio.wait_for(
-                            asyncio.to_thread(self.stream.read, chunk_samples, False),
-                            timeout=2.0  # Max 2 seconds per read
+                            asyncio.to_thread(self.stream.read, chunk_samples, exception_on_overflow=False),
+                            timeout=1.5  # Reasonable timeout for USB audio read
                         )
                     except asyncio.TimeoutError:
-                        logger.warning("Audio read timeout - device may be busy, retrying...")
-                        await asyncio.sleep(0.5)
-                        continue
+                        logger.error("⚠️ Audio read timeout - device may be busy or stream corrupted")
+                        # Force cleanup of corrupted stream immediately
+                        try:
+                            if self.stream:
+                                if self.stream.is_active():
+                                    self.stream.stop_stream()
+                                self.stream.close()
+                                self.stream = None
+                        except Exception as cleanup_err:
+                            logger.error(f"Error during stream cleanup: {cleanup_err}")
+                        # Raise exception to trigger failure counter and PyAudio reinitialization
+                        raise RuntimeError("Audio stream timeout - ALSA stream corrupted, needs reinitialization")
+                    except IOError as io_error:
+                        logger.error(f"⚠️ Audio I/O error (ALSA buffer issue): {io_error}")
+                        # Force cleanup
+                        try:
+                            if self.stream:
+                                if self.stream.is_active():
+                                    self.stream.stop_stream()
+                                self.stream.close()
+                                self.stream = None
+                        except:
+                            pass
+                        # Raise to trigger reinitialization
+                        raise RuntimeError(f"Audio I/O error - ALSA needs reinitialization: {io_error}")
                     except Exception as read_error:
-                        logger.error(f"Audio read error: {read_error}, retrying...")
-                        await asyncio.sleep(0.5)
-                        continue
+                        logger.error(f"⚠️ Audio read error: {read_error}")
+                        # Force cleanup of corrupted stream
+                        try:
+                            if self.stream:
+                                if self.stream.is_active():
+                                    self.stream.stop_stream()
+                                self.stream.close()
+                                self.stream = None
+                        except:
+                            pass
+                        # Re-raise to trigger failure counter
+                        raise
                     
                     audio_chunk = np.frombuffer(audio_bytes, dtype=np.int16)
                     
@@ -371,6 +434,7 @@ class CloudWakeWordDetector:
                             speech_start = time.time()
                             # Start with pre-speech buffer for context
                             speech_buffer = list(pre_speech_buffer)
+                            print(f"[WakeWord] 🗣️ Speech started")
                             logger.info("🗣️ Speech started")
                         
                         speech_buffer.append(audio_chunk)
@@ -395,8 +459,10 @@ class CloudWakeWordDetector:
                             if silence_duration >= self.min_silence_duration:
                                 # End of speech - transcribe via cloud
                                 speech_duration = time.time() - speech_start
+                                print(f"[WakeWord] Speech ended: duration={speech_duration:.2f}s, required={self.min_speech_duration}s")
                                 
                                 if speech_duration >= self.min_speech_duration:
+                                    print(f"[WakeWord] ✅ Duration OK, processing {speech_duration:.2f}s via cloud...")
                                     logger.info(f"🎤 Processing speech ({speech_duration:.2f}s) via cloud...")
                                     
                                     # Transcribe via cloud with timeout protection
@@ -444,14 +510,22 @@ class CloudWakeWordDetector:
             self.running = False
             if self.stream:
                 try:
-                    self.stream.stop_stream()
+                    # Only stop if stream is active to avoid errors
+                    if self.stream.is_active():
+                        self.stream.stop_stream()
                 except Exception as e:
-                    logger.error(f"Error stopping stream: {e}")
+                    logger.warning(f"Error stopping stream during cleanup: {e}")
+                
                 try:
+                    # Always try to close, even if stop failed
                     self.stream.close()
                 except Exception as e:
-                    logger.error(f"Error closing stream: {e}")
+                    logger.warning(f"Error closing stream during cleanup: {e}")
+                
+                # Clear reference to allow garbage collection
                 self.stream = None
+                
+                logger.info("Wake word detection stream cleaned up")
     
     def stop(self):
         """Stop wake word detection."""
@@ -471,30 +545,35 @@ class CloudWakeWordDetector:
     
     def pause(self):
         """Pause wake word detection temporarily (e.g., during speech/music)."""
-        if self.stream:
-            try:
-                self.stream.stop_stream()
-                logger.debug("Wake word detector paused")
-            except Exception as e:
-                logger.error(f"Error pausing stream: {e}")
+        # DISABLED: Pause/resume operations cause ALSA memory corruption
+        # Just set a flag and let the detection loop handle it
+        logger.debug("Wake word detector pause requested (no-op to avoid ALSA corruption)")
+        pass
     
     def resume(self):
         """Resume wake word detection after pause."""
-        if self.stream:
-            try:
-                self.stream.start_stream()
-                logger.debug("Wake word detector resumed")
-            except Exception as e:
-                logger.error(f"Error resuming stream: {e}")
+        # DISABLED: Pause/resume operations cause ALSA memory corruption  
+        # Just set a flag and let the detection loop handle it
+        logger.debug("Wake word detector resume requested (no-op to avoid ALSA corruption)")
+        pass
     
     def cleanup(self):
         """Clean up resources."""
         self.stop()
         
-        if hasattr(self, 'pyaudio') and self.pyaudio:
-            self.pyaudio.terminate()
+        # Force garbage collection before terminating PyAudio
+        import gc
+        gc.collect()
         
-        logger.info("Wake word detector cleaned up")
+        if hasattr(self, 'pyaudio') and self.pyaudio:
+            try:
+                self.pyaudio.terminate()
+                self.pyaudio = None
+                logger.info("✅ PyAudio terminated")
+            except Exception as e:
+                logger.error(f"Error terminating PyAudio: {e}")
+        
+        logger.info("✅ Wake word detector cleaned up")
 
 
 # Synchronous wrapper for backward compatibility

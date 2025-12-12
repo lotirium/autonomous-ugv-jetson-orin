@@ -9,14 +9,18 @@ User=rovy
 Group=rovy
 SupplementaryGroups=video plugdev audio
 WorkingDirectory=/home/rovy/rovy_client/robot
+# Disable WirePlumber before starting to prevent audio conflicts
+ExecStartPre=/bin/bash /home/rovy/rovy_client/robot/disable_wireplumber.sh
+# Fix USB power management to prevent audio timeouts
+ExecStartPre=/bin/bash /home/rovy/rovy_client/robot/fix_usb_audio_power.sh
 ExecStart=/bin/bash /home/rovy/rovy_client/robot/start.sh
 
 # Restart configuration
 Restart=always
 RestartSec=10
 
-# Watchdog to detect freezes - restart if no keepalive for 2 minutes
-WatchdogSec=120
+# Watchdog disabled - Deepgram API handles stability
+# WatchdogSec=300
 
 # Output
 StandardOutput=journal

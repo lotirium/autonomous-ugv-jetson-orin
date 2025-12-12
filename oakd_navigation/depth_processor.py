@@ -152,7 +152,29 @@ class DepthProcessor:
         # CRITICAL FIX: Force USB2 mode to avoid USB3 stability issues on Raspberry Pi
         # This is a known fix for the "silent death" frame freeze issue
         print("[DepthProcessor] Forcing USB2 mode (prevents freeze bug)...")
-        self.device = dai.Device(self.pipeline, maxUsbSpeed=dai.UsbSpeed.HIGH)
+        
+        # Retry logic for device connection (handles device-in-use errors)
+        max_retries = 3
+        retry_delay = 1.0
+        
+        for attempt in range(max_retries):
+            try:
+                self.device = dai.Device(self.pipeline, maxUsbSpeed=dai.UsbSpeed.HIGH)
+                break  # Success!
+            except RuntimeError as e:
+                if "X_LINK_DEVICE_ALREADY_IN_USE" in str(e):
+                    print(f"[DepthProcessor] Device busy (attempt {attempt + 1}/{max_retries})")
+                    if attempt < max_retries - 1:
+                        print(f"[DepthProcessor] Waiting {retry_delay}s before retry...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                    else:
+                        print("[DepthProcessor] ❌ Device still in use after retries")
+                        print("[DepthProcessor] Try running: python oakd_navigation/release_oakd_device.py")
+                        raise
+                else:
+                    # Different error, don't retry
+                    raise
         
         # Set device logging level
         self.device.setLogLevel(dai.LogLevel.WARN)

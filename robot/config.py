@@ -32,8 +32,8 @@ ROVER_BAUDRATE = 115200
 CAMERA_INDEX = int(os.getenv("ROVY_CAMERA_INDEX", "1"))  # USB Camera is at /dev/video1
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
-CAMERA_FPS = 15
-JPEG_QUALITY = 80
+CAMERA_FPS = 10  # Reduced from 15 to lower USB bandwidth for audio stability
+JPEG_QUALITY = 70  # Reduced for lower bandwidth
 
 # =============================================================================
 # Audio (ReSpeaker)
@@ -49,13 +49,17 @@ AUDIO_BUFFER_SECONDS = 2.0
 # =============================================================================
 
 # Wake words to listen for (case-insensitive)
-WAKE_WORDS = ["hey rovy", "rovy", "hey robot", "hey"]
+WAKE_WORDS = ["hey rovy", "hey robbie", "hey rolly", "hey", "rovy", "robbie", "rolly"]
+
+# Deepgram API for wake word detection (more reliable than local)
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "1d0af4b59c6353a2940618aa858ec0bdfe80bda7")
+USE_DEEPGRAM = True  # Set to True to use Deepgram (cloud-based, accurate), False for local detector
 
 # VAD (Voice Activity Detection) settings
 VAD_SAMPLE_RATE = 16000
-VAD_THRESHOLD = 0.15  # Confidence threshold for speech detection (0.0-1.0) - lowered for far distance detection
-VAD_MIN_SPEECH_DURATION = 0.4  # Minimum speech duration in seconds (reduced to catch shorter utterances)
-VAD_MIN_SILENCE_DURATION = 0.6  # Minimum silence after speech in seconds
+VAD_THRESHOLD = 0.3  # Confidence threshold for speech detection (0.0-1.0) - higher = less sensitive to noise
+VAD_MIN_SPEECH_DURATION = 1.0  # Minimum speech duration in seconds (wait for complete phrases)
+VAD_MIN_SILENCE_DURATION = 1.2  # Minimum silence after speech in seconds (ensure sentence ends)
 
 # Whisper settings for local wake word detection
 WHISPER_MODEL = "tiny"  # tiny, base, small (tiny is fastest for Pi)

@@ -69,10 +69,19 @@ except ImportError:
 
 try:
     from wake_word_detector_cloud import CloudWakeWordDetector
-    WAKE_WORD_OK = True
+    WAKE_WORD_CLOUD_OK = True
 except ImportError:
-    WAKE_WORD_OK = False
-    print("WARNING: Wake word detector not available. Install with: bash install_wake_word.sh")
+    WAKE_WORD_CLOUD_OK = False
+    print("WARNING: Cloud wake word detector not available")
+
+try:
+    from wake_word_detector_deepgram import DeepgramWakeWordDetector
+    WAKE_WORD_DEEPGRAM_OK = True
+except ImportError:
+    WAKE_WORD_DEEPGRAM_OK = False
+    print("WARNING: Deepgram wake word detector not available")
+
+WAKE_WORD_OK = WAKE_WORD_CLOUD_OK or WAKE_WORD_DEEPGRAM_OK
 
 try:
     from rover import Rover
@@ -185,6 +194,10 @@ class RobotServer:
         self.voice_ws = None  # WebSocket connection to cloud /voice endpoint
         self.audio_sample_rate = config.SAMPLE_RATE  # Default, will be updated in init_audio
         
+        # Audio device mutex - ensures only ONE process accesses audio device at a time
+        # This prevents ALSA errors when PyAudio and aplay try to access simultaneously
+        self.audio_lock = asyncio.Lock()
+        
         # Navigation state (for USB bandwidth management)
         self.is_navigating = False  # True when OAK-D navigation is active
         
@@ -270,21 +283,41 @@ class RobotServer:
         try:
             self.pyaudio = pyaudio.PyAudio()
             
-            # Find microphone device (USB Headphone Set or ReSpeaker)
+            # Find microphone device (prefer USB Camera, then USB Headphone Set, then ReSpeaker)
             device_index = None
+            camera_device_index = None
+            headphone_device_index = None
+            respeaker_device_index = None
+            
             for i in range(self.pyaudio.get_device_count()):
                 info = self.pyaudio.get_device_info_by_index(i)
                 name = info.get('name', '').lower()
                 max_input_channels = info.get('maxInputChannels', 0)
                 
-                # Prefer USB Headphone Set, fallback to ReSpeaker
-                if device_index is None and max_input_channels > 0:
-                    if 'headphone' in name or 'set' in name:
-                        device_index = i
+                if max_input_channels > 0:
+                    # Identify USB Camera microphone (more reliable than USB Headphone Set)
+                    if 'camera' in name:
+                        camera_device_index = i
+                        print(f"[Audio] Found USB Camera microphone: {info['name']}")
+                    # USB Headphone Set (fallback)
+                    elif 'headphone' in name or 'set' in name:
+                        headphone_device_index = i
                         print(f"[Audio] Found USB Headphone Set: {info['name']}")
+                    # ReSpeaker (last resort)
                     elif 'respeaker' in name or 'seeed' in name:
-                        device_index = i
+                        respeaker_device_index = i
                         print(f"[Audio] Found ReSpeaker: {info['name']}")
+            
+            # Prefer USB Camera > USB Headphone Set > ReSpeaker
+            if camera_device_index is not None:
+                device_index = camera_device_index
+                print(f"[Audio] Using USB Camera microphone (more reliable)")
+            elif headphone_device_index is not None:
+                device_index = headphone_device_index
+                print(f"[Audio] Using USB Headphone Set")
+            elif respeaker_device_index is not None:
+                device_index = respeaker_device_index
+                print(f"[Audio] Using ReSpeaker")
             
             if device_index is None:
                 # Fallback: use default input device
@@ -301,6 +334,14 @@ class RobotServer:
             # Get device's default sample rate
             device_info = self.pyaudio.get_device_info_by_index(device_index)
             device_sample_rate = int(device_info.get('defaultSampleRate', 48000))
+            
+            # WORKAROUND: USB Camera reports 44100Hz but only supports 48000Hz
+            # Force 48000Hz for USB Camera to avoid ALSA errors
+            device_name = device_info.get('name', '').lower()
+            if 'camera' in device_name and device_sample_rate == 44100:
+                print(f"[Audio] USB Camera reports 44100Hz but supports 48000Hz, correcting...")
+                device_sample_rate = 48000
+            
             self.audio_sample_rate = device_sample_rate
             
             # If device doesn't support 16kHz, we'll record at device rate and resample
@@ -341,21 +382,17 @@ class RobotServer:
         except Exception as e:
             print(f"[Volume] Hardware init failed: {e}")
     
-    def speak_acknowledgment(self, text="Yes?"):
-        """Quick non-blocking speech for acknowledgments using Piper."""
-        def do_speak():
+    async def speak_acknowledgment_async(self, text="Yes?"):
+        """Quick speech for acknowledgments using Piper with audio device locking."""
+        import tempfile
+        import os
+        
+        # Acquire audio lock to ensure exclusive access
+        async with self.audio_lock:
             try:
-                import tempfile
-                import os
-                
                 self.is_speaking = True  # Pause wake word detection
-                # Pause wake word detector audio stream to release device
-                if hasattr(self, 'wake_word_detector') and self.wake_word_detector:
-                    try:
-                        self.wake_word_detector.pause()
-                    except:
-                        pass
                 print(f"[WakeWord] Playing acknowledgment: '{text}'")
+                
                 piper_voice = config.PIPER_VOICES.get("en")
                 if not os.path.exists(piper_voice):
                     print(f"[WakeWord] Piper voice not found: {piper_voice}")
@@ -365,72 +402,106 @@ class RobotServer:
                 with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
                     wav_path = f.name
                 
-                # Generate with Piper
-                proc = subprocess.run(
-                    ['piper', '--model', piper_voice, '--output_file', wav_path],
-                    input=text,
-                    text=True,
-                    capture_output=True,
+                # Generate with Piper (async)
+                print("[WakeWord] Waiting for audio device to stabilize...")
+                await asyncio.sleep(0.5)
+                
+                # Use full path to piper from venv (not in PATH when running as systemd service)
+                piper_bin = os.path.join(os.path.dirname(__file__), 'venv', 'bin', 'piper')
+                proc = await asyncio.create_subprocess_exec(
+                    piper_bin, '--model', piper_voice, '--output_file', wav_path,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(input=text.encode('utf-8')),
                     timeout=5
                 )
                 
                 if proc.returncode == 0 and os.path.exists(wav_path):
                     print(f"[WakeWord] Generated audio, playing on {config.SPEAKER_DEVICE}")
-                    # Play with aplay
-                    play_result = subprocess.run(
-                        ['aplay', '-D', config.SPEAKER_DEVICE, wav_path],
-                        capture_output=True,
-                        timeout=5
+                    # Play with aplay (async)
+                    play_proc = await asyncio.create_subprocess_exec(
+                        'aplay', '-D', config.SPEAKER_DEVICE, wav_path,
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.PIPE
                     )
-                    if play_result.returncode == 0:
+                    
+                    await asyncio.wait_for(play_proc.wait(), timeout=5)
+                    
+                    if play_proc.returncode == 0:
                         print(f"[WakeWord] ✅ Acknowledgment played")
                     else:
-                        print(f"[WakeWord] aplay error: {play_result.stderr.decode()[:100]}")
+                        stderr_bytes = await play_proc.stderr.read()
+                        print(f"[WakeWord] aplay error: {stderr_bytes.decode()[:100]}")
+                    
                     os.unlink(wav_path)
                 else:
-                    print(f"[WakeWord] Piper generation failed: {proc.stderr.decode()[:100]}")
+                    print(f"[WakeWord] Piper generation failed: {stderr.decode()[:100]}")
+            except asyncio.TimeoutError:
+                print(f"[WakeWord] Acknowledgment timeout")
             except Exception as e:
                 print(f"[WakeWord] Acknowledgment error: {e}")
                 import traceback
                 traceback.print_exc()
             finally:
-                # Wait 0.5s for audio to clear from mic before resuming detection
-                import time
-                time.sleep(0.5)
+                # Wait for audio to fully clear and device to be released
+                await asyncio.sleep(2.0)
                 self.is_speaking = False  # Resume wake word detection
-                # Resume wake word detector audio stream
-                if hasattr(self, 'wake_word_detector') and self.wake_word_detector:
-                    try:
-                        self.wake_word_detector.resume()
-                    except:
-                        pass
-        
-        # Run in background thread
-        threading.Thread(target=do_speak, daemon=True).start()
     
     def init_wake_word(self):
-        """Initialize wake word detection with Silero VAD + Whisper."""
+        """Initialize wake word detection (Deepgram or Cloud-based)."""
         if not WAKE_WORD_OK:
             print("[WakeWord] Wake word detection not available")
             return False
         
         try:
-            print("[WakeWord] Loading Cloud-based Wake Word Detector (Silero VAD + Cloud Whisper)...")
             device_rate = self.audio_sample_rate if hasattr(self, 'audio_sample_rate') else config.VAD_SAMPLE_RATE
             device_idx = self.audio_device_index if hasattr(self, 'audio_device_index') else None
-            print(f"[WakeWord] Config: device_rate={device_rate}, device_index={device_idx}, vad_rate={config.VAD_SAMPLE_RATE}")
-            self.wake_word_detector = CloudWakeWordDetector(
-                wake_words=config.WAKE_WORDS,
-                cloud_url=f"ws://{config.PC_SERVER_IP}:{config.API_PORT}/voice",
-                sample_rate=config.VAD_SAMPLE_RATE,
-                device_sample_rate=device_rate,
-                device_index=device_idx,
-                vad_threshold=config.VAD_THRESHOLD,
-                min_speech_duration=config.VAD_MIN_SPEECH_DURATION,
-                min_silence_duration=config.VAD_MIN_SILENCE_DURATION,
-            )
-            self.wake_word_enabled = True
-            print(f"[WakeWord] Ready! Listening for: {config.WAKE_WORDS}")
+            
+            # Use Deepgram if configured and available
+            if hasattr(config, 'USE_DEEPGRAM') and config.USE_DEEPGRAM and WAKE_WORD_DEEPGRAM_OK:
+                print("[WakeWord] Loading Deepgram Streaming API (professional-grade)...")
+                print(f"[WakeWord] Config: device_rate={device_rate}, device_index={device_idx}")
+                
+                # Deepgram works best with 16kHz
+                deepgram_sample_rate = 16000
+                print(f"[WakeWord] Using 16kHz for Deepgram (resampling from {device_rate}Hz)")
+                
+                self.wake_word_detector = DeepgramWakeWordDetector(
+                    api_key=config.DEEPGRAM_API_KEY,
+                    wake_words=config.WAKE_WORDS,
+                    sample_rate=deepgram_sample_rate,  # Use 16kHz for Deepgram
+                    device_sample_rate=device_rate,  # Original device rate
+                    device_index=device_idx,
+                )
+                self.wake_word_enabled = True
+                self.wake_word_mode = "deepgram"
+                print(f"[WakeWord] ✅ Deepgram ready! Listening for: {config.WAKE_WORDS}")
+                
+            # Fall back to cloud-based detector
+            elif WAKE_WORD_CLOUD_OK:
+                print("[WakeWord] Loading Cloud-based Wake Word Detector (Silero VAD + Cloud Whisper)...")
+                print(f"[WakeWord] Config: device_rate={device_rate}, device_index={device_idx}, vad_rate={config.VAD_SAMPLE_RATE}")
+                
+                self.wake_word_detector = CloudWakeWordDetector(
+                    wake_words=config.WAKE_WORDS,
+                    cloud_url=f"ws://{config.PC_SERVER_IP}:{config.API_PORT}/voice",
+                    sample_rate=config.VAD_SAMPLE_RATE,
+                    device_sample_rate=device_rate,
+                    device_index=device_idx,
+                    vad_threshold=config.VAD_THRESHOLD,
+                    min_speech_duration=config.VAD_MIN_SPEECH_DURATION,
+                    min_silence_duration=config.VAD_MIN_SILENCE_DURATION,
+                )
+                self.wake_word_enabled = True
+                self.wake_word_mode = "cloud"
+                print(f"[WakeWord] Ready! Listening for: {config.WAKE_WORDS}")
+            else:
+                print("[WakeWord] No wake word detector available")
+                return False
             return True
         except Exception as e:
             print(f"[WakeWord] Init failed: {e}")
@@ -438,39 +509,57 @@ class RobotServer:
             traceback.print_exc()
             return False
     
-    async def connect_voice_websocket(self):
-        """Connect to cloud /voice WebSocket endpoint."""
+    async def connect_voice_websocket(self, retry_count=0, max_retries=3):
+        """Connect to cloud /voice WebSocket endpoint with retry logic."""
         if not WEBSOCKETS_OK:
             return False
         
-        try:
-            # Get cloud HTTP URL and convert to WebSocket
-            cloud_http_url = config.SERVER_URL.replace('ws://', 'http://').replace('wss://', 'https://')
-            cloud_http_url = cloud_http_url.replace(':8765', ':8000')  # FastAPI runs on 8000
-            voice_ws_url = cloud_http_url.replace('http://', 'ws://').replace('https://', 'wss://')
-            voice_ws_url = f"{voice_ws_url}/voice"
-            
-            print(f"[Voice] Connecting to {voice_ws_url}...")
-            # Add connection timeout to prevent hanging
-            self.voice_ws = await asyncio.wait_for(
-                websockets.connect(
-                    voice_ws_url,
-                    ping_interval=30,
-                    ping_timeout=10,
-                    close_timeout=5
-                ),
-                timeout=10.0
-            )
-            print("[Voice] Connected to cloud voice endpoint")
-            return True
-        except asyncio.TimeoutError:
-            print(f"[Voice] Connection timeout")
+        # Close existing connection if any
+        if self.voice_ws:
+            try:
+                await self.voice_ws.close()
+            except:
+                pass
             self.voice_ws = None
-            return False
-        except Exception as e:
-            print(f"[Voice] Connection failed: {e}")
-            self.voice_ws = None
-            return False
+        
+        for attempt in range(retry_count, max_retries):
+            try:
+                # Get cloud HTTP URL and convert to WebSocket
+                cloud_http_url = config.SERVER_URL.replace('ws://', 'http://').replace('wss://', 'https://')
+                cloud_http_url = cloud_http_url.replace(':8765', ':8000')  # FastAPI runs on 8000
+                voice_ws_url = cloud_http_url.replace('http://', 'ws://').replace('https://', 'wss://')
+                voice_ws_url = f"{voice_ws_url}/voice"
+                
+                if attempt > 0:
+                    print(f"[Voice] Connecting to {voice_ws_url}... (attempt {attempt+1}/{max_retries})")
+                else:
+                    print(f"[Voice] Connecting to {voice_ws_url}...")
+                
+                # Add connection timeout to prevent hanging
+                self.voice_ws = await asyncio.wait_for(
+                    websockets.connect(
+                        voice_ws_url,
+                        ping_interval=30,
+                        ping_timeout=10,
+                        close_timeout=3
+                    ),
+                    timeout=10.0
+                )
+                print("[Voice] Connected to cloud voice endpoint")
+                return True
+            except asyncio.TimeoutError:
+                print(f"[Voice] Connection timeout")
+                if attempt < max_retries - 1:
+                    wait_time = min(2 ** attempt, 5.0)  # Exponential backoff: 1s, 2s, 4s max
+                    await asyncio.sleep(wait_time)
+            except Exception as e:
+                print(f"[Voice] Connection failed: {e}")
+                if attempt < max_retries - 1:
+                    wait_time = min(2 ** attempt, 5.0)
+                    await asyncio.sleep(wait_time)
+        
+        self.voice_ws = None
+        return False
     
     def calculate_audio_energy(self, audio_data):
         """Calculate audio energy for VAD (Voice Activity Detection)."""
@@ -493,20 +582,36 @@ class RobotServer:
         print("[Voice] 🎤 Recording...")
         self.is_recording = True
         
-        try:
-            # Try to open stream
+        # Pause wake word detector to prevent audio device conflict
+        if hasattr(self, 'wake_word_detector') and self.wake_word_detector:
             try:
-                stream = self.pyaudio.open(
-                    format=pyaudio.paInt16,
-                    channels=config.CHANNELS,
-                    rate=self.audio_sample_rate,  # Use device's native sample rate
-                    input=True,
-                    input_device_index=self.audio_device_index,
-                    frames_per_buffer=config.CHUNK_SIZE
-                )
-            except Exception as stream_error:
-                print(f"[Voice] Failed to open audio stream: {stream_error}")
-                return
+                self.wake_word_detector.pause()
+                await asyncio.sleep(0.2)  # Give time for detector to pause
+            except Exception as e:
+                print(f"[Voice] Warning: Could not pause wake word detector: {e}")
+        
+        try:
+            # Try to open stream with retry logic
+            stream = None
+            max_retries = 3
+            for retry in range(max_retries):
+                try:
+                    stream = self.pyaudio.open(
+                        format=pyaudio.paInt16,
+                        channels=config.CHANNELS,
+                        rate=self.audio_sample_rate,  # Use device's native sample rate
+                        input=True,
+                        input_device_index=self.audio_device_index,
+                        frames_per_buffer=config.CHUNK_SIZE
+                    )
+                    break  # Success
+                except Exception as stream_error:
+                    print(f"[Voice] Failed to open audio stream (attempt {retry+1}/{max_retries}): {stream_error}")
+                    if retry < max_retries - 1:
+                        await asyncio.sleep(0.5)  # Wait before retry
+                    else:
+                        print(f"[Voice] Could not open stream after retries")
+                        return
             
             audio_chunks = []
             chunk_count = 0
@@ -584,83 +689,14 @@ class RobotServer:
             print(f"[Voice] Recording failed: {e}")
         finally:
             self.is_recording = False
-    
-    async def listen_for_wake_word(self):
-        """Continuously listen for wake word 'Rovy'."""
-        if not AUDIO_OK or not self.pyaudio or self.audio_device_index is None:
-            return
-        
-        if not self.wake_word_enabled:
-            return
-        
-        print("[WakeWord] 👂 Listening for 'Rovy'...")
-        
-        try:
-            stream = self.pyaudio.open(
-                format=pyaudio.paInt16,
-                channels=config.CHANNELS,
-                rate=self.audio_sample_rate,  # Use device's native sample rate
-                input=True,
-                output=False,  # Explicitly input-only
-                input_device_index=self.audio_device_index,
-                frames_per_buffer=config.CHUNK_SIZE
-            )
-            
-            # Buffer for accumulating audio (for text-based detection)
-            audio_buffer = []
-            buffer_duration = 3.0  # seconds
-            buffer_size = int(config.SAMPLE_RATE / config.CHUNK_SIZE * buffer_duration)
-            
-            while self.running and not self.is_recording:
+            # Resume wake word detector
+            if hasattr(self, 'wake_word_detector') and self.wake_word_detector:
                 try:
-                    audio_data = stream.read(config.CHUNK_SIZE, exception_on_overflow=False)
-                    energy = self.calculate_audio_energy(audio_data)
-                    
-                    # Simple VAD: if energy is above threshold, accumulate audio
-                    vad_threshold = 300  # Adjust based on your microphone
-                    if energy > vad_threshold:
-                        audio_buffer.append(audio_data)
-                        # Keep buffer size limited
-                        if len(audio_buffer) > buffer_size:
-                            audio_buffer.pop(0)
-                    else:
-                        # Check buffer for wake word if we have enough audio
-                        if len(audio_buffer) > int(config.SAMPLE_RATE / config.CHUNK_SIZE * 0.5):  # At least 0.5s
-                            # Try to detect wake word using Whisper (via cloud)
-                            # For now, use a simpler approach: send to cloud for transcription
-                            # and check for "rovy" in the text
-                            
-                            # Combine buffer audio
-                            combined_audio = b''.join(audio_buffer)
-                            audio_buffer = []  # Clear buffer
-                            
-                            # Quick check: send to cloud for transcription
-                            # We'll use a lightweight approach: send short audio clip
-                            # to cloud /voice endpoint for wake word detection
-                            
-                            # For efficiency, we'll use a simpler method:
-                            # Check if we should trigger based on pattern
-                            # For now, let's use a hybrid: if energy spikes, check with cloud
-                            
-                            # Actually, let's use a simpler approach:
-                            # Periodically send audio to cloud for wake word detection
-                            # But to avoid too many requests, we'll only do this when energy is high
-                            
-                            # For now, implement a simple pattern: if we detect speech-like
-                            # patterns, send to cloud for transcription
-                            pass
-                    
-                    await asyncio.sleep(0.01)  # Small delay to avoid busy waiting
-                    
+                    self.wake_word_detector.resume()
                 except Exception as e:
-                    print(f"[WakeWord] Error: {e}")
-                    await asyncio.sleep(0.1)
-            
-            stream.stop_stream()
-            stream.close()
-            
-        except Exception as e:
-            print(f"[WakeWord] Listening failed: {e}")
+                    print(f"[Voice] Warning: Could not resume wake word detector: {e}")
+    
+    # OLD WAKE WORD FUNCTION - REMOVED (Now using CloudWakeWordDetector in wake_word_detection_loop)
     
     async def wake_word_detection_loop(self):
         """Main loop for wake word detection using Cloud-based detector."""
@@ -673,6 +709,9 @@ class RobotServer:
         
         print("[WakeWord] 👂 Starting cloud-based wake word detection (Silero VAD + Cloud Whisper)...")
         last_health_check = time.time()
+        consecutive_failures = 0
+        MAX_CONSECUTIVE_FAILURES = 1  # Reinitialize immediately after failure to prevent corruption
+        last_failure_time = 0
         
         while self.running and not self.is_recording:
             # Health check
@@ -687,59 +726,128 @@ class RobotServer:
                     await asyncio.sleep(0.1)
                     continue
                 
-                # Run wake word detection using async cloud detector
-                detected = await self.wake_word_detector.listen_for_wake_word_async(timeout=10)
+                # Run wake word detection
+                # Note: Deepgram mode doesn't need audio lock (only reads mic, doesn't use speakers)
+                # Cloud mode may need it depending on implementation
+                try:
+                    # Only use audio lock for non-Deepgram modes to prevent blocking speaker output
+                    if self.wake_word_mode == "deepgram":
+                        # Deepgram can run concurrently with speaker output
+                        timeout_duration = None
+                        detected = await asyncio.wait_for(
+                            self.wake_word_detector.listen_for_wake_word_async(timeout=timeout_duration),
+                            timeout=300.0  # 5min for Deepgram
+                        )
+                    else:
+                        # Cloud mode: use audio lock to prevent conflicts
+                        async with self.audio_lock:
+                            timeout_duration = 10
+                            detected = await asyncio.wait_for(
+                                self.wake_word_detector.listen_for_wake_word_async(timeout=timeout_duration),
+                                timeout=20.0  # 20s for cloud
+                            )
+                except asyncio.TimeoutError:
+                    print(f"[WakeWord] Detection cycle timeout ({self.wake_word_mode}), restarting...")
+                    detected = False
+                
+                # Reset failure counter on successful detection cycle
+                consecutive_failures = 0
                 
                 if detected and not self.is_recording:
                     print("[WakeWord] ✅ Wake word detected!")
                     
-                    # Play acknowledgment via Piper (non-blocking)
+                    # CRITICAL: Ensure wake word detector stream is fully stopped and released
+                    # The listen_for_wake_word_async has a finally block that closes the stream,
+                    # but we need to:
+                    # 1. Explicitly stop the detector
+                    # 2. Wait for stream cleanup
+                    # 3. Wait for ALSA driver to fully release the device
+                    print("[WakeWord] Waiting for audio device to stabilize...")
                     try:
-                        await asyncio.to_thread(self.speak_acknowledgment, "Yes?")
-                        await asyncio.sleep(0.5)  # Brief pause for acknowledgment to play
+                        # Force detector to stop and release stream
+                        if hasattr(self, 'wake_word_detector') and self.wake_word_detector:
+                            self.wake_word_detector.stop()
+                    except Exception as stop_err:
+                        print(f"[WakeWord] Error stopping detector: {stop_err}")
+                    
+                    # Wait for ALSA to fully release the device
+                    await asyncio.sleep(1.0)
+                    
+                    # Play acknowledgment via Piper with audio lock
+                    try:
+                        await self.speak_acknowledgment_async("Yes?")
                     except Exception as e:
                         print(f"[WakeWord] Could not play acknowledgment: {e}")
                     
-                    # Record full query using pyaudio
+                    # Record full query using pyaudio WITH AUDIO LOCK
                     print("[WakeWord] 🎤 Recording your question...")
                     try:
-                        # Record audio for query
-                        frames = []
-                        stream = self.pyaudio.open(
-                            format=pyaudio.paInt16,
-                            channels=config.CHANNELS,
-                            rate=self.audio_sample_rate,
-                            input=True,
-                            input_device_index=self.audio_device_index,
-                            frames_per_buffer=config.CHUNK_SIZE
-                        )
-                        
-                        num_chunks = int(self.audio_sample_rate / config.CHUNK_SIZE * config.QUERY_RECORD_DURATION)
-                        for _ in range(num_chunks):
-                            data = stream.read(config.CHUNK_SIZE, exception_on_overflow=False)
-                            frames.append(data)
-                        
-                        stream.stop_stream()
-                        stream.close()
+                        async with self.audio_lock:
+                            # Wait for device to be ready
+                            await asyncio.sleep(0.5)
+                            
+                            # Record audio for query - open new stream with retry logic
+                            frames = []
+                            stream = None
+                            max_retries = 3
+                            for retry in range(max_retries):
+                                try:
+                                    stream = self.pyaudio.open(
+                                        format=pyaudio.paInt16,
+                                        channels=config.CHANNELS,
+                                        rate=self.audio_sample_rate,
+                                        input=True,
+                                        input_device_index=self.audio_device_index,
+                                        frames_per_buffer=config.CHUNK_SIZE
+                                    )
+                                    break  # Success
+                                except Exception as stream_error:
+                                    print(f"[WakeWord] Failed to open stream (attempt {retry+1}/{max_retries}): {stream_error}")
+                                    if retry < max_retries - 1:
+                                        await asyncio.sleep(1.0)  # Longer wait before retry
+                                    else:
+                                        print("[WakeWord] ⚠️ Could not open audio stream after retries, skipping query")
+                                        continue  # Skip to next wake word detection
+                            
+                            if stream is None:
+                                continue  # Stream opening failed, skip query recording
+                            
+                            num_chunks = int(self.audio_sample_rate / config.CHUNK_SIZE * config.QUERY_RECORD_DURATION)
+                            for _ in range(num_chunks):
+                                data = stream.read(config.CHUNK_SIZE, exception_on_overflow=False)
+                                frames.append(data)
+                            
+                            stream.stop_stream()
+                            stream.close()
                         
                         audio_bytes = b''.join(frames)
                         
-                        # Apply AGC (Automatic Gain Control) to normalize volume
+                        # Apply AGC and resample to 16000Hz for cloud processing
                         try:
                             import numpy as np
                             audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                            
+                            # CRITICAL: Resample to 16000Hz if device is using a different rate
+                            if self.audio_sample_rate != 16000:
+                                from scipy import signal
+                                # Calculate target number of samples for 16000Hz
+                                target_length = int(len(audio_array) * 16000 / self.audio_sample_rate)
+                                audio_array = signal.resample(audio_array, target_length)
+                                print(f"[WakeWord] Resampled from {self.audio_sample_rate}Hz to 16000Hz")
                             
                             # Check audio energy
                             rms = np.sqrt(np.mean(audio_array ** 2))
                             max_amplitude = np.max(np.abs(audio_array))
                             print(f"[WakeWord] Audio stats: RMS={rms:.4f}, Max={max_amplitude:.4f}")
                             
-                            # Apply AGC if audio is too quiet (target RMS ~0.15)
-                            target_rms = 0.15
-                            if rms > 0.001:  # Only if there's some audio
-                                gain = min(target_rms / rms, 10.0)  # Limit gain to 10x
+                            # Apply AGC if audio is too quiet (target RMS ~0.10, reduced to preserve quality)
+                            target_rms = 0.10  # Reduced from 0.15 to avoid over-amplification
+                            if rms > 0.005:  # Only amplify if there's reasonable audio (increased threshold)
+                                gain = min(target_rms / rms, 3.0)  # Limit to 3x (reduced from 10x to preserve quality)
                                 audio_array = np.clip(audio_array * gain, -1.0, 1.0)
-                                print(f"[WakeWord] Applied AGC: gain={gain:.2f}x")
+                                print(f"[WakeWord] Applied AGC: gain={gain:.2f}x (limited to preserve quality)")
+                            elif rms > 0.001:
+                                print(f"[WakeWord] Audio too quiet (RMS={rms:.4f}), not applying AGC to avoid noise")
                             else:
                                 print(f"[WakeWord] ⚠️ Audio is very quiet (RMS < 0.001), may be silence")
                             
@@ -762,7 +870,7 @@ class RobotServer:
                                 await self.voice_ws.send(json.dumps({
                                     "type": "audio_end",
                                     "encoding": "base64",
-                                    "sampleRate": self.audio_sample_rate
+                                    "sampleRate": 16000  # Always 16000Hz after resampling
                                 }))
                                 print("[WakeWord] ✅ Audio sent to cloud for processing")
                             except Exception as e:
@@ -773,15 +881,105 @@ class RobotServer:
                                     print(f"[WakeWord] Error sending audio: {e}")
                     except Exception as e:
                         print(f"[WakeWord] Error recording query: {e}")
+                    
+                    # IMPORTANT: Wait before resuming wake word detection
+                    # This ensures the AI response can be spoken without being interrupted
+                    print("[WakeWord] Waiting before resuming wake word detection...")
+                    await asyncio.sleep(3.0)  # Wait for AI response to be spoken
                 
                 # Small delay before next detection cycle
                 await asyncio.sleep(0.1)
                 
             except Exception as e:
-                print(f"[WakeWord] Error in detection loop: {e}")
+                current_time = time.time()
+                print(f"[WakeWord] ⚠️ Error in detection loop: {e}")
                 import traceback
                 traceback.print_exc()
-                await asyncio.sleep(1)
+                
+                consecutive_failures += 1
+                print(f"[WakeWord] Consecutive failures: {consecutive_failures}/{MAX_CONSECUTIVE_FAILURES}")
+                
+                # On error, ensure detector is stopped and cleaned up
+                try:
+                    if hasattr(self, 'wake_word_detector') and self.wake_word_detector:
+                        self.wake_word_detector.stop()
+                        await asyncio.sleep(0.5)  # Give time for cleanup
+                except Exception as stop_err:
+                    print(f"[WakeWord] Error stopping detector after exception: {stop_err}")
+                
+                # Check if error mentions ALSA/audio corruption (needs immediate reinitialization)
+                error_str = str(e).lower()
+                needs_reinit = (
+                    consecutive_failures >= MAX_CONSECUTIVE_FAILURES or
+                    'alsa' in error_str or
+                    'timeout' in error_str or
+                    'corrupted' in error_str or
+                    'audio stream' in error_str
+                )
+                
+                # If too many consecutive failures or ALSA corruption, reinitialize PyAudio
+                if needs_reinit:
+                    print("[WakeWord] 🔄 Audio corruption detected, reinitializing audio system...")
+                    try:
+                        # Full cleanup
+                        if hasattr(self, 'wake_word_detector') and self.wake_word_detector:
+                            print("[WakeWord] Cleaning up corrupted wake word detector...")
+                            self.wake_word_detector.cleanup()
+                            self.wake_word_detector = None
+                        
+                        # Also cleanup main PyAudio instance if it exists
+                        if hasattr(self, 'pyaudio') and self.pyaudio:
+                            print("[WakeWord] Terminating main PyAudio instance...")
+                            try:
+                                self.pyaudio.terminate()
+                            except:
+                                pass
+                            self.pyaudio = None
+                        
+                        # Force garbage collection to free corrupted C objects
+                        import gc
+                        gc.collect()
+                        
+                        # Wait longer for ALSA to fully release device
+                        print("[WakeWord] Waiting for ALSA to release audio device...")
+                        await asyncio.sleep(3.0)
+                        
+                        # Reinitialize audio system
+                        print("[WakeWord] Reinitializing audio...")
+                        if self.init_audio():
+                            print("[WakeWord] ✅ Audio reinitialized")
+                            
+                            # Reinitialize wake word detector
+                            print("[WakeWord] Reinitializing wake word detector...")
+                            if self.init_wake_word():
+                                consecutive_failures = 0
+                                last_failure_time = current_time
+                                print("[WakeWord] ✅ Audio system fully reinitialized")
+                            else:
+                                print("[WakeWord] ❌ Failed to reinitialize wake word detector")
+                                await asyncio.sleep(10.0)
+                                continue
+                        else:
+                            print("[WakeWord] ❌ Failed to reinitialize audio")
+                            await asyncio.sleep(10.0)
+                            continue
+                    except Exception as reinit_err:
+                        print(f"[WakeWord] ❌ Reinitialization failed: {reinit_err}")
+                        import traceback
+                        traceback.print_exc()
+                        # If reinit fails, wait longer and try again
+                        await asyncio.sleep(10.0)
+                        continue
+                
+                # Wait before retry to allow cleanup (longer if recent failure)
+                time_since_last_failure = current_time - last_failure_time
+                if time_since_last_failure < 30:
+                    wait_time = 5.0
+                else:
+                    wait_time = 2.0
+                print(f"[WakeWord] Waiting {wait_time}s before restarting detection...")
+                await asyncio.sleep(wait_time)
+                last_failure_time = current_time
     
     async def receive_voice_responses(self):
         """Receive responses from voice WebSocket (transcripts, AI responses, etc.)."""
@@ -843,9 +1041,18 @@ class RobotServer:
                     
                 except asyncio.TimeoutError:
                     continue  # No message, continue waiting
-                except websockets.exceptions.ConnectionClosed:
-                    print("[Voice] Connection closed, reconnecting...")
-                    await self.connect_voice_websocket()
+                except websockets.exceptions.ConnectionClosed as e:
+                    print(f"[Voice] Connection closed: {e}, reconnecting...")
+                    # Exponential backoff reconnection
+                    retry_count = 0
+                    while retry_count < 3 and self.running:
+                        await asyncio.sleep(min(2 ** retry_count, 10.0))
+                        if await self.connect_voice_websocket(retry_count=retry_count):
+                            break
+                        retry_count += 1
+                    if retry_count >= 3:
+                        print("[Voice] Failed to reconnect after multiple attempts")
+                        await asyncio.sleep(10.0)  # Wait longer before trying again
                 except Exception as e:
                     print(f"[Voice] Error receiving message: {e}")
                     await asyncio.sleep(0.5)
@@ -1251,7 +1458,7 @@ class RobotServer:
                                 "image_base64": base64.b64encode(image_bytes).decode('utf-8'),
                                 "width": config.CAMERA_WIDTH,
                                 "height": config.CAMERA_HEIGHT,
-                                "timestamp": datetime.now(datetime.UTC).isoformat()
+                                "timestamp": datetime.now().isoformat()
                             }))
                     except Exception as e:
                         print(f"[Cloud Stream] Camera error: {e}")
@@ -1270,17 +1477,24 @@ class RobotServer:
                             "battery_voltage": status.get('voltage'),
                             "battery_percent": self.rover.voltage_to_percent(status.get('voltage')),
                             "temperature": status.get('temperature'),
-                            "timestamp": datetime.now(datetime.UTC).isoformat()
+                            "timestamp": datetime.now().isoformat()
                         }))
                     last_sensor_time = now
                 
                 await asyncio.sleep(0.01)
                 
-            except websockets.exceptions.ConnectionClosed:
-                print("[Cloud Stream] Connection lost")
+            except websockets.exceptions.ConnectionClosed as e:
+                # Don't spam logs with "no close frame" errors - just log once
+                if not hasattr(self, '_cloud_stream_close_logged'):
+                    print(f"[Cloud Stream] Connection closed: {e}")
+                    self._cloud_stream_close_logged = True
+                # Break cleanly - don't spam camera errors
                 break
             except Exception as e:
-                print(f"[Cloud Stream] Error: {e}")
+                # Filter out common benign errors to reduce log spam
+                error_str = str(e).lower()
+                if 'no close frame' not in error_str:
+                    print(f"[Cloud Stream] Error: {e}")
                 await asyncio.sleep(0.1)
     
     async def receive_from_cloud(self):
@@ -1311,11 +1525,18 @@ class RobotServer:
                 
             except asyncio.TimeoutError:
                 continue
-            except websockets.exceptions.ConnectionClosed:
-                print("[Cloud Receive] Connection lost")
+            except websockets.exceptions.ConnectionClosed as e:
+                # Don't spam logs - just log once
+                if not hasattr(self, '_cloud_receive_close_logged'):
+                    print(f"[Cloud Receive] Connection closed: {e}")
+                    self._cloud_receive_close_logged = True
+                # Break cleanly
                 break
             except Exception as e:
-                print(f"[Cloud Receive] Error: {e}")
+                # Filter out benign errors
+                error_str = str(e).lower()
+                if 'no close frame' not in error_str:
+                    print(f"[Cloud Receive] Error: {e}")
     
     def cleanup(self):
         """Clean up resources."""
@@ -1537,20 +1758,15 @@ async def get_status():
 
 @app.get("/shot")
 async def get_shot():
-    """Get single camera frame - uses USB camera for manual control."""
+    """Get single camera frame - uses OAK-D camera for manual control."""
     robot = get_robot()
     
-    # Use USB camera for manual control (faster and more reliable)
-    if robot.usb_camera is None or not robot.usb_camera.isOpened():
-        raise HTTPException(status_code=503, detail="USB camera not available")
+    # Ensure OAK-D is initialized
+    if not robot.ensure_oakd_initialized():
+        raise HTTPException(status_code=503, detail="OAK-D camera not available")
     
-    # Capture from USB camera
-    ret, frame = robot.usb_camera.read()
-    if ret and frame is not None:
-        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, config.JPEG_QUALITY])
-        image_bytes = buffer.tobytes()
-    else:
-        image_bytes = None
+    # Capture from OAK-D camera using prefer_oakd=True
+    image_bytes = robot.capture_image(prefer_oakd=True)
     
     # If capture failed (queue empty), try to use cached image as fallback
     if not image_bytes:
@@ -1711,6 +1927,12 @@ async def camera_websocket(websocket: WebSocket):
                     })
                 else:
                     consecutive_failures += 1
+            except (WebSocketDisconnect, RuntimeError) as ws_err:
+                # Client disconnected or websocket closed - exit cleanly
+                if "WebSocket" in str(ws_err) or "close message" in str(ws_err):
+                    break
+                print(f"[API] Camera capture error: {ws_err}")
+                consecutive_failures += 1
             except Exception as cam_err:
                 print(f"[API] Camera capture error: {cam_err}")
                 consecutive_failures += 1
@@ -1934,10 +2156,22 @@ async def control_navigation(command: NavigationCommand):
                 robot.is_navigating = True  # Pause USB camera to avoid bandwidth contention
                 print("[Navigation API] USB camera paused (OAK-D navigation active)")
                 
-                if robot.navigator is None:
-                    from rovy_integration import RovyNavigator
-                    robot.navigator = RovyNavigator(rover_instance=robot.rover)
-                    robot.navigator.start()
+                # Clean up any existing navigator to avoid device conflicts
+                if robot.navigator is not None:
+                    try:
+                        print("[Navigation API] Cleaning up existing navigator...")
+                        robot.navigator.stop()
+                        robot.navigator.cleanup()
+                        robot.navigator = None
+                        time.sleep(0.5)  # Give device time to fully release
+                    except Exception as cleanup_err:
+                        print(f"[Navigation API] Cleanup warning: {cleanup_err}")
+                        robot.navigator = None
+                
+                # Create fresh navigator instance
+                from rovy_integration import RovyNavigator
+                robot.navigator = RovyNavigator(rover_instance=robot.rover)
+                robot.navigator.start()
                 
                 print(f"[Navigation API] Starting exploration (duration={command.duration})")
                 robot.navigator.explore(duration=command.duration)
@@ -1984,10 +2218,22 @@ async def control_navigation(command: NavigationCommand):
                 robot.is_navigating = True  # Pause USB camera
                 print("[Navigation API] USB camera paused (OAK-D navigation active)")
                 
-                if robot.navigator is None:
-                    from rovy_integration import RovyNavigator
-                    robot.navigator = RovyNavigator(rover_instance=robot.rover)
-                    robot.navigator.start()
+                # Clean up any existing navigator to avoid device conflicts
+                if robot.navigator is not None:
+                    try:
+                        print("[Navigation API] Cleaning up existing navigator...")
+                        robot.navigator.stop()
+                        robot.navigator.cleanup()
+                        robot.navigator = None
+                        time.sleep(0.5)  # Give device time to fully release
+                    except Exception as cleanup_err:
+                        print(f"[Navigation API] Cleanup warning: {cleanup_err}")
+                        robot.navigator = None
+                
+                # Create fresh navigator instance
+                from rovy_integration import RovyNavigator
+                robot.navigator = RovyNavigator(rover_instance=robot.rover)
+                robot.navigator.start()
                 
                 print(f"[Navigation API] Navigating to ({x}, {y})")
                 robot.navigator.navigate_to(x, y)
@@ -2023,91 +2269,107 @@ async def speak_text(request: dict):
     else:
         print(f"[Speak] {text[:80]}...")
     
-    # Run TTS in background thread so it doesn't block API response
-    def do_speak():
-        try:
-            import tempfile
-            import os
-            
-            robot.is_speaking = True  # Pause wake word detection
-            # Pause wake word detector audio stream to release device
-            if hasattr(robot, 'wake_word_detector') and robot.wake_word_detector:
-                try:
-                    robot.wake_word_detector.pause()
-                except:
-                    pass
-            
-            # Select Piper voice based on language
-            piper_voice = config.PIPER_VOICES.get(language, config.PIPER_VOICES.get("en"))
-            
-            # Check if voice file exists
-            if not os.path.exists(piper_voice):
-                print(f"[Speak] Warning: Piper voice not found for {language}: {piper_voice}")
-                # Fall back to English voice
-                piper_voice = config.PIPER_VOICES.get("en")
-                if not os.path.exists(piper_voice):
-                    print(f"[Speak] Error: No Piper voices available")
-                    robot.is_speaking = False
-                    return
-                print(f"[Speak] Using English voice as fallback")
-            
-            # Create temp wav file
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-                wav_path = f.name
-            
-            # Generate speech with Piper
-            print(f"[Speak] Generating with Piper ({os.path.basename(piper_voice)})...")
-            proc = subprocess.run(
-                ['piper', '--model', piper_voice, '--output_file', wav_path],
-                input=text,
-                text=True,
-                capture_output=True,
-                timeout=30
-            )
-            
-            if proc.returncode == 0 and os.path.exists(wav_path):
-                file_size = os.path.getsize(wav_path)
-                print(f"[Speak] Generated {file_size} bytes, playing...")
+    # Run TTS asynchronously with audio lock
+    async def do_speak_async():
+        print(f"[Speak] DEBUG: do_speak_async started")
+        async with robot.audio_lock:
+            print(f"[Speak] DEBUG: acquired audio lock")
+            try:
+                import tempfile
+                import os
                 
-                # Use aplay with correct device - most reliable on Pi
-                # -D specifies the device, plughw:2,0 for USB speaker (Card 2)
-                play_proc = subprocess.run(
-                    ['aplay', '-D', config.SPEAKER_DEVICE, wav_path],
-                    capture_output=True,
+                robot.is_speaking = True  # Pause wake word detection
+                print(f"[Speak] DEBUG: set is_speaking=True")
+                
+                # Select Piper voice based on language
+                piper_voice = config.PIPER_VOICES.get(language, config.PIPER_VOICES.get("en"))
+                print(f"[Speak] DEBUG: selected voice: {piper_voice}")
+                
+                # Check if voice file exists
+                if not os.path.exists(piper_voice):
+                    print(f"[Speak] Warning: Piper voice not found for {language}: {piper_voice}")
+                    # Fall back to English voice
+                    piper_voice = config.PIPER_VOICES.get("en")
+                    if not os.path.exists(piper_voice):
+                        print(f"[Speak] Error: No Piper voices available")
+                        robot.is_speaking = False
+                        return
+                    print(f"[Speak] Using English voice as fallback")
+                
+                # Create temp wav file
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                    wav_path = f.name
+                
+                # Generate speech with Piper (async)
+                # Use full path to piper from venv (not in PATH when running as systemd service)
+                piper_bin = os.path.join(os.path.dirname(__file__), 'venv', 'bin', 'piper')
+                print(f"[Speak] Generating with Piper ({os.path.basename(piper_voice)})...")
+                proc = await asyncio.create_subprocess_exec(
+                    piper_bin, '--model', piper_voice, '--output_file', wav_path,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(input=text.encode('utf-8')),
                     timeout=30
                 )
                 
-                if play_proc.returncode == 0:
-                    print(f"[Speak] Played successfully with aplay on {config.SPEAKER_DEVICE}")
+                if proc.returncode == 0 and os.path.exists(wav_path):
+                    file_size = os.path.getsize(wav_path)
+                    print(f"[Speak] Generated {file_size} bytes, playing...")
+                    
+                    # Use aplay with correct device - most reliable on Pi
+                    # -D specifies the device, plughw:2,0 for USB speaker (Card 2)
+                    play_proc = await asyncio.create_subprocess_exec(
+                        'aplay', '-D', config.SPEAKER_DEVICE, wav_path,
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    
+                    await asyncio.wait_for(play_proc.wait(), timeout=30)
+                    
+                    if play_proc.returncode == 0:
+                        print(f"[Speak] Played successfully with aplay on {config.SPEAKER_DEVICE}")
+                    else:
+                        # Fallback to ffplay (but may not use correct device)
+                        print(f"[Speak] aplay failed, trying ffplay...")
+                        fallback_proc = await asyncio.create_subprocess_exec(
+                            'ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', wav_path,
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL
+                        )
+                        await asyncio.wait_for(fallback_proc.wait(), timeout=30)
+                        print(f"[Speak] Played with ffplay fallback")
+                    
+                    os.unlink(wav_path)
                 else:
-                    # Fallback to ffplay (but may not use correct device)
-                    print(f"[Speak] aplay failed, trying ffplay...")
-                    subprocess.run(['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', wav_path], capture_output=True, timeout=30)
-                    print(f"[Speak] Played with ffplay fallback")
-                
-                os.unlink(wav_path)
-            else:
-                error = proc.stderr.decode()[:200] if proc.stderr else "Unknown error"
-                print(f"[Speak] Piper failed: {error}")
-                
+                    error = stderr.decode()[:200] if stderr else "Unknown error"
+                    print(f"[Speak] Piper failed: {error}")
+                    
+            except Exception as e:
+                print(f"[Speak] TTS error: {e}")
+                import traceback
+                traceback.print_exc()
+            finally:
+                # Wait for audio to clear from mic before resuming detection
+                await asyncio.sleep(0.5)
+                robot.is_speaking = False  # Resume wake word detection
+    
+    # Start speaking as background task (non-blocking)
+    task = asyncio.create_task(do_speak_async())
+    
+    # Add callback to log any uncaught exceptions
+    def log_task_exception(task):
+        try:
+            task.result()
         except Exception as e:
-            print(f"[Speak] TTS error: {e}")
+            print(f"[Speak] Background task exception: {e}")
             import traceback
             traceback.print_exc()
-        finally:
-            # Wait 0.5s for audio to clear from mic before resuming detection
-            import time
-            time.sleep(0.5)
-            robot.is_speaking = False  # Resume wake word detection
-            # Resume wake word detector audio stream
-            if hasattr(robot, 'wake_word_detector') and robot.wake_word_detector:
-                try:
-                    robot.wake_word_detector.resume()
-                except:
-                    pass
     
-    # Start speaking in background
-    threading.Thread(target=do_speak, daemon=True).start()
+    task.add_done_callback(log_task_exception)
     
     # Return immediately
     return {"status": "speaking", "method": "piper_async", "language": language}
@@ -2882,21 +3144,12 @@ async def run_robot_server():
         
         # Keep running with health monitoring
         last_health_log = time.time()
-        last_watchdog_notify = time.time()
+        
         try:
             while robot_server.running:
                 await asyncio.sleep(1)
                 
                 now = time.time()
-                
-                # Notify systemd watchdog every 60 seconds (watchdog timeout is 120s)
-                if now - last_watchdog_notify > 60:
-                    try:
-                        import systemd.daemon
-                        systemd.daemon.notify('WATCHDOG=1')
-                        last_watchdog_notify = now
-                    except:
-                        pass
                 
                 # Log health status every 5 minutes to show service is alive
                 if now - last_health_log > 300:
