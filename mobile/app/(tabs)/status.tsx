@@ -67,9 +67,22 @@ export default function SummariesScreen() {
       }));
 
       setSummaries(convertedSummaries);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to fetch meetings:', err);
-      setError('Failed to load meetings. Pull to refresh.');
+      
+      // Provide more helpful error messages
+      let errorMessage = 'Failed to load meetings. Pull to refresh.';
+      if (err?.code === 'ERR_NETWORK' || err?.message?.includes('Network Error')) {
+        errorMessage = 'Cannot reach cloud server. Check your network connection and ensure the cloud server is running.';
+      } else if (err?.response?.status === 503) {
+        errorMessage = 'Meeting service not available on cloud server. It may need to be enabled or dependencies installed.';
+      } else if (err?.response?.status === 404) {
+        errorMessage = 'Meetings endpoint not found. The cloud server may need to be updated.';
+      } else if (err?.response?.status >= 500) {
+        errorMessage = 'Cloud server error. Please try again later.';
+      }
+      
+      setError(errorMessage);
       
       // Fallback to empty array on error
       setSummaries([]);
