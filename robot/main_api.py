@@ -2253,8 +2253,100 @@ async def control_navigation(command: NavigationCommand):
 
 
 # ============================================================================
-# PHOTO TIME - Printing endpoint (capture uses existing /shot endpoint)
+# PHOTO TIME - Save to gallery and printing endpoints
 # ============================================================================
+
+@app.post("/photo/save")
+async def save_photo():
+    """Capture photo from OAK-D camera and save to gallery.
+    
+    Captures full-resolution photo without cropping and saves to local gallery directory.
+    Returns the filename and path of the saved photo.
+    """
+    robot = get_robot()
+    
+    # Ensure OAK-D is initialized
+    if not robot.ensure_oakd_initialized():
+        raise HTTPException(status_code=503, detail="OAK-D camera not available")
+    
+    # Capture from OAK-D camera (full resolution, no cropping)
+    image_bytes = robot.capture_image(prefer_oakd=True)
+    
+    if not image_bytes:
+        raise HTTPException(status_code=503, detail="Failed to capture image from OAK-D camera")
+    
+    # Create gallery directory if it doesn't exist
+    import os
+    from pathlib import Path
+    
+    gallery_dir = Path(__file__).parent / "gallery"
+    gallery_dir.mkdir(exist_ok=True)
+    
+    # Generate unique filename with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"photo_{timestamp}.jpg"
+    filepath = gallery_dir / filename
+    
+    # Save the full image (no cropping)
+    try:
+        with open(filepath, "wb") as f:
+            f.write(image_bytes)
+        
+        print(f"[Photo] Saved to gallery: {filename}")
+        
+        return {
+            "status": "success",
+            "message": "Photo saved to gallery",
+            "filename": filename,
+            "path": str(filepath)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save photo: {str(e)}")
+
+
+@app.get("/photo/gallery")
+async def list_gallery_photos():
+    """List all photos in the gallery."""
+    from pathlib import Path
+    
+    gallery_dir = Path(__file__).parent / "gallery"
+    
+    if not gallery_dir.exists():
+        return {"photos": []}
+    
+    # Get all JPEG files in gallery, sorted by modification time (newest first)
+    photos = []
+    for photo_path in sorted(gallery_dir.glob("*.jpg"), key=lambda p: p.stat().st_mtime, reverse=True):
+        photos.append({
+            "filename": photo_path.name,
+            "timestamp": photo_path.stat().st_mtime,
+            "size": photo_path.stat().st_size
+        })
+    
+    return {"photos": photos, "count": len(photos)}
+
+
+@app.get("/photo/gallery/{filename}")
+async def get_gallery_photo(filename: str):
+    """Retrieve a specific photo from the gallery."""
+    from pathlib import Path
+    
+    gallery_dir = Path(__file__).parent / "gallery"
+    filepath = gallery_dir / filename
+    
+    # Security check: ensure the path is within the gallery directory
+    if not filepath.resolve().parent == gallery_dir.resolve():
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    
+    if not filepath.exists():
+        raise HTTPException(status_code=404, detail="Photo not found")
+    
+    # Read and return the image
+    with open(filepath, "rb") as f:
+        image_bytes = f.read()
+    
+    return Response(content=image_bytes, media_type="image/jpeg")
+
 
 @app.post("/photo/print")
 async def print_photo(request: dict):
