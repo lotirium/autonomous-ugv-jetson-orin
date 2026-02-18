@@ -5,7 +5,7 @@
 <div align="center">
   <img src="ugv-side-view.jpg" width="45%" alt="UGV Side View" />
   <img src="ugv-front-view.jpg" width="45%" alt="UGV Front View" />
-  <p><em><b>Figure 1:</b> The Autonomous UGV prototype featuring the <b>OAK-D Stereo Camera</b> (top) and <b>RPLIDAR</b> (center) for SLAM and obstacle avoidance. Powered by <b>NVIDIA Jetson Orin</b>.</em></p>
+  <p><em>The Autonomous UGV prototype featuring the <b>OAK-D Stereo Camera</b> (top) and <b>RPLIDAR</b> (center) for SLAM and obstacle avoidance. Powered by <b>NVIDIA Jetson Orin</b>.</em></p>
 </div>
 
 A production-grade autonomous Unmanned Ground Vehicle (UGV) system leveraging NVIDIA Jetson Orin's edge AI computing capabilities. This capstone design project demonstrates advanced computer vision, real-time sensor fusion, and distributed system architecture for autonomous navigation in complex environments.
